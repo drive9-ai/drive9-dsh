@@ -24,7 +24,7 @@ import { applyLiteralEdit, decodeText, decodeTextStream, normalizeLineEndings, t
 
 const DEFAULT_DIFF_BASIS_MAX_BYTES = 10 * 1024 * 1024
 const DEFAULT_CAS_ATTEMPTS = 4
-const DEFAULT_COHERENCE_TIMEOUT_MS = 10_000
+const DEFAULT_COHERENCE_TIMEOUT_MS = 30_000
 const DEFAULT_COHERENCE_POLL_MS = 50
 const MAX_BATCH_STAT_PATHS = 256
 

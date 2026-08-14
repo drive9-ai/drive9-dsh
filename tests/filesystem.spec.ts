@@ -62,6 +62,15 @@ describe('Drive9FileSystem', () => {
     })).toThrow('mountConsistency must be "strong" or "eventual"')
   })
 
+  it('allows a full default FUSE cache-expiry window before failing strong coherence', () => {
+    const fs = new Drive9FileSystem(new Context(), { apiKey: 'workspace-key' }, () => new FakeDrive9Client())
+    expect(fs.config).toMatchObject({
+      coherenceTimeoutMs: 30_000,
+      mountConsistency: 'strong',
+      verifyCoherence: true,
+    })
+  })
+
   it('fails startup for missing, non-directory, and remote-file roots', async () => {
     const { fs, client, mountRoot } = await setup({ verifyCoherence: false })
     const missing = new Drive9FileSystem(new Context(), {
