@@ -1,34 +1,58 @@
 import { Context } from '@deepseek-ai/cordis'
 import { FsError } from '@deepseek-ai/dsh-fs'
-import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Drive9FileSystem } from '../src/filesystem.js'
+import type { Drive9MountConsistency } from '../src/filesystem.js'
 import { FakeDrive9Client, FakeStatusError } from './fake-drive9.js'
 
 const roots: string[] = []
+
+class HangingMountStatFileSystem extends Drive9FileSystem {
+  protected override mountStat(_processPath: string): Promise<never> {
+    return new Promise<never>(() => {})
+  }
+}
 
 afterEach(async () => {
   const { rm } = await import('node:fs/promises')
   await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true })))
 })
 
-async function setup(overrides: { verifyCoherence?: boolean; mirrored?: boolean } = {}) {
+async function setup(overrides: {
+  verifyCoherence?: boolean
+  mirrored?: boolean
+  mirrorWrites?: boolean
+  mirrorDeletes?: boolean
+  mountConsistency?: Drive9MountConsistency
+  hangMountStat?: boolean
+} = {}) {
   const mountRoot = await mkdtemp(join(tmpdir(), 'drive9-dsh-fs-'))
   roots.push(mountRoot)
-  const client = new FakeDrive9Client(overrides.mirrored === false ? {} : { mountRoot, remoteRoot: '/workspace' })
+  const client = new FakeDrive9Client(overrides.mirrored === false
+    ? {}
+    : {
+        mountRoot,
+        remoteRoot: '/workspace',
+        ...(overrides.mirrorWrites === undefined ? {} : { mirrorWrites: overrides.mirrorWrites }),
+        ...(overrides.mirrorDeletes === undefined ? {} : { mirrorDeletes: overrides.mirrorDeletes }),
+      })
   client.mkdirRecord('/workspace')
-  const fs = new Drive9FileSystem(new Context(), {
+  const context = new Context().intercept('logger', { level: 2 })
+  const FileSystemClass = overrides.hangMountStat === true ? HangingMountStatFileSystem : Drive9FileSystem
+  const fs = new FileSystemClass(context, {
     mountRoot,
     remoteRoot: '/workspace',
     apiKey: 'workspace-key',
-    verifyCoherence: overrides.verifyCoherence ?? true,
+    ...(overrides.mountConsistency === undefined ? {} : { mountConsistency: overrides.mountConsistency }),
+    ...(overrides.verifyCoherence === undefined ? {} : { verifyCoherence: overrides.verifyCoherence }),
     coherenceTimeoutMs: 100,
     coherencePollMs: 2,
   }, () => client)
-  return { fs, client, mountRoot }
+  return { fs, client, context, mountRoot }
 }
 
 async function expectFsCode(promise: Promise<unknown>, code: string): Promise<void> {
@@ -39,6 +63,13 @@ describe('Drive9FileSystem', () => {
   it('requires an explicit workspace credential', () => {
     expect(() => new Drive9FileSystem(new Context(), { apiKey: '', verifyCoherence: false }))
       .toThrow('filesystem apiKey is required')
+  })
+
+  it('rejects an unknown mount consistency profile', () => {
+    expect(() => new Drive9FileSystem(new Context(), {
+      apiKey: 'workspace-key',
+      mountConsistency: 'silent-downgrade' as Drive9MountConsistency,
+    })).toThrow('mountConsistency must be "strong" or "eventual"')
   })
 
   it('fails startup for missing, non-directory, and remote-file roots', async () => {
@@ -82,9 +113,126 @@ describe('Drive9FileSystem', () => {
     expect([...client.nodes].some(([path]) => path.includes('.drive9-dsh-coherence-'))).toBe(false)
   })
 
+  it('cleans the coherence probe through the mount instead of assuming remote-delete invalidation', async () => {
+    const { fs, mountRoot } = await setup({ mirrorDeletes: false })
+    await expect(fs.initialize()).resolves.toBeUndefined()
+    expect(await readdir(mountRoot)).toEqual([])
+  })
+
+  it('waits for mount metadata before reading newly committed bytes', async () => {
+    const { fs, client, mountRoot } = await setup({ mirrorWrites: false })
+    let replacement: Promise<void> | undefined
+    client.afterWrite = async (remotePath, data) => {
+      if (!remotePath.includes('.drive9-dsh-coherence-')) return
+      const localPath = join(mountRoot, remotePath.slice('/workspace/'.length))
+      await mkdir(localPath)
+      replacement = new Promise(resolve => setTimeout(resolve, 20)).then(async () => {
+        await rm(localPath, { recursive: true })
+        await writeFile(localPath, data)
+      })
+    }
+
+    await fs.initialize()
+    await replacement
+  })
+
+  it('waits for delayed mount propagation after every SDK write and edit path', async () => {
+    const { fs, client, mountRoot } = await setup({ mirrorWrites: false })
+    const propagated: Promise<void>[] = []
+    let workspaceWrites = 0
+    client.afterWrite = async (remotePath, data) => {
+      const localPath = join(mountRoot, remotePath.slice('/workspace/'.length))
+      if (remotePath.includes('.drive9-dsh-coherence-')) {
+        await writeFile(localPath, data)
+        return
+      }
+
+      workspaceWrites += 1
+      if (workspaceWrites === 1) await mkdir(localPath)
+      const propagation = new Promise(resolve => setTimeout(resolve, 20)).then(async () => {
+        await rm(localPath, { force: true, recursive: true })
+        await writeFile(localPath, data)
+      })
+      propagated.push(propagation)
+    }
+
+    await fs.initialize()
+    const target = await fs.resolve('propagated.txt')
+    const created = await fs.writeText(target, 'created', { kind: 'createIfAbsent' })
+    await fs.writeText(target, 'unconditional')
+    const current = await fs.stat(target)
+    expect(current?.version).toBeDefined()
+    await fs.editText(
+      target,
+      { oldString: 'unconditional', newString: 'guarded edit', replaceAll: false },
+      { version: current!.version },
+    )
+    await fs.editText(target, { oldString: 'guarded edit', newString: 'final', replaceAll: false })
+
+    expect(created.operation).toBe('create')
+    expect(workspaceWrites).toBe(4)
+    await Promise.all(propagated)
+    expect(await readFile(fs.processPath(target), 'utf8')).toBe('final')
+  })
+
+  it('fails a committed SDK write when the mount never exposes the bytes', async () => {
+    const { fs, client, mountRoot } = await setup({ mirrorWrites: false })
+    client.afterWrite = async (remotePath, data) => {
+      if (!remotePath.includes('.drive9-dsh-coherence-')) return
+      const localPath = join(mountRoot, remotePath.slice('/workspace/'.length))
+      await writeFile(localPath, data)
+    }
+
+    await fs.initialize()
+    const target = await fs.resolve('stale-mount.txt')
+    await expectFsCode(fs.writeText(target, 'committed remotely', { kind: 'createIfAbsent' }), 'FS_IO_ERROR')
+    expect(Buffer.from(client.getFile('/workspace/stale-mount.txt') ?? []).toString('utf8')).toBe('committed remotely')
+    await expect(readFile(fs.processPath(target), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('times out when a mount metadata operation never returns', async () => {
+    const { fs, client } = await setup({ verifyCoherence: false, hangMountStat: true })
+    await fs.initialize()
+    const target = await fs.resolve('blocked-mount.txt')
+
+    await expectFsCode(fs.writeText(target, 'committed remotely', { kind: 'createIfAbsent' }), 'FS_IO_ERROR')
+    expect(Buffer.from(client.getFile('/workspace/blocked-mount.txt') ?? []).toString('utf8')).toBe('committed remotely')
+  }, 1_000)
+
   it('fails startup when the mount and SDK are not one execution world', async () => {
     const { fs } = await setup({ mirrored: false })
+    await expect(fs.initialize()).rejects.toMatchObject({
+      message: expect.stringMatching(/coherence proof failed/),
+      cause: { code: 'FS_IO_ERROR' },
+    })
+  })
+
+  it('makes eventual mount consistency explicit and does not wait for process visibility', async () => {
+    const { fs, client, context } = await setup({ mirrorWrites: false, mountConsistency: 'eventual' })
+    await fs.initialize()
+    expect(fs.config).toMatchObject({ mountConsistency: 'eventual', verifyCoherence: false })
+    expect(context.logger.buffer).toContainEqual(expect.objectContaining({
+      type: 'warn',
+      args: [expect.stringMatching(/may remain stale for more than 30 seconds/)],
+    }))
+
+    const target = await fs.resolve('eventual.txt')
+    await fs.writeText(target, 'committed through the SDK', { kind: 'createIfAbsent' })
+    expect(Buffer.from(client.getFile('/workspace/eventual.txt') ?? []).toString('utf8')).toBe('committed through the SDK')
+    await expect(readFile(fs.processPath(target), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('honors an explicit coherence proof in eventual mode instead of silently downgrading it', async () => {
+    const { fs } = await setup({ mirrored: false, mountConsistency: 'eventual', verifyCoherence: true })
     await expect(fs.initialize()).rejects.toThrow(/coherence proof failed/)
+  })
+
+  it('runs the SDK-to-mount leg when eventual mode explicitly requests a coherence proof', async () => {
+    const { fs } = await setup({ mirrorWrites: false, mountConsistency: 'eventual', verifyCoherence: true })
+    await expect(fs.initialize()).rejects.toMatchObject({
+      message: expect.stringMatching(/coherence proof failed/),
+      cause: { code: 'FS_IO_ERROR' },
+    })
   })
 
   it('implements create and replace CAS with stable Drive9 revisions', async () => {

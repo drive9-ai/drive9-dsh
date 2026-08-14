@@ -7,7 +7,7 @@ import resultTools from './result-tools.js'
 import type { Drive9ResultToolsConfig } from './result-tools.js'
 
 export { Drive9FileSystem } from './filesystem.js'
-export type { Drive9FileSystemConfig } from './filesystem.js'
+export type { Drive9FileSystemConfig, Drive9MountConsistency } from './filesystem.js'
 export { Drive9EvidenceStore } from './evidence.js'
 export type { Drive9EvidenceConfig, EvidenceManifestV1, PublishedEvidence } from './evidence.js'
 export { Drive9ResultError } from './result-error.js'

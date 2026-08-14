@@ -28,11 +28,14 @@ const DEFAULT_COHERENCE_TIMEOUT_MS = 10_000
 const DEFAULT_COHERENCE_POLL_MS = 50
 const MAX_BATCH_STAT_PATHS = 256
 
+export type Drive9MountConsistency = 'strong' | 'eventual'
+
 export interface Drive9FileSystemConfig {
   mountRoot?: string
   remoteRoot?: string
   baseUrl?: string
   apiKey: string
+  mountConsistency?: Drive9MountConsistency
   diffBasisMaxBytes?: number
   casAttempts?: number
   coherenceTimeoutMs?: number
@@ -45,6 +48,7 @@ interface ResolvedConfig {
   readonly remoteRoot: string
   readonly baseUrl?: string
   readonly apiKey?: string
+  readonly mountConsistency: Drive9MountConsistency
   readonly diffBasisMaxBytes: number
   readonly casAttempts: number
   readonly coherenceTimeoutMs: number
@@ -61,16 +65,21 @@ function resolveConfig(config: Drive9FileSystemConfig): ResolvedConfig {
   if (config.apiKey === undefined || config.apiKey.length === 0) {
     throw new TypeError('drive9-dsh: filesystem apiKey is required for SDK-backed revision CAS')
   }
+  const mountConsistency = config.mountConsistency ?? 'strong'
+  if (mountConsistency !== 'strong' && mountConsistency !== 'eventual') {
+    throw new TypeError('drive9-dsh: mountConsistency must be "strong" or "eventual"')
+  }
   return {
     mountRoot: config.mountRoot ?? '/mnt/drive9',
     remoteRoot: config.remoteRoot ?? '/',
     ...(config.baseUrl !== undefined ? { baseUrl: config.baseUrl } : {}),
     ...(config.apiKey !== undefined ? { apiKey: config.apiKey } : {}),
+    mountConsistency,
     diffBasisMaxBytes: positiveSafeInteger(config.diffBasisMaxBytes ?? DEFAULT_DIFF_BASIS_MAX_BYTES, 'diffBasisMaxBytes'),
     casAttempts: positiveSafeInteger(config.casAttempts ?? DEFAULT_CAS_ATTEMPTS, 'casAttempts'),
     coherenceTimeoutMs: positiveSafeInteger(config.coherenceTimeoutMs ?? DEFAULT_COHERENCE_TIMEOUT_MS, 'coherenceTimeoutMs'),
     coherencePollMs: positiveSafeInteger(config.coherencePollMs ?? DEFAULT_COHERENCE_POLL_MS, 'coherencePollMs'),
-    verifyCoherence: config.verifyCoherence ?? true,
+    verifyCoherence: config.verifyCoherence ?? mountConsistency === 'strong',
   }
 }
 
@@ -108,11 +117,12 @@ export class Drive9FileSystem extends FileSystem {
     remoteRoot: z.string().default('/'),
     baseUrl: z.string(),
     apiKey: z.string().required().role('secret'),
+    mountConsistency: z.union([z.const('strong'), z.const('eventual')]).default('strong'),
     diffBasisMaxBytes: z.number().default(DEFAULT_DIFF_BASIS_MAX_BYTES),
     casAttempts: z.number().default(DEFAULT_CAS_ATTEMPTS),
     coherenceTimeoutMs: z.number().default(DEFAULT_COHERENCE_TIMEOUT_MS),
     coherencePollMs: z.number().default(DEFAULT_COHERENCE_POLL_MS),
-    verifyCoherence: z.boolean().default(true),
+    verifyCoherence: z.boolean(),
   })
 
   readonly config: ResolvedConfig
@@ -148,6 +158,11 @@ export class Drive9FileSystem extends FileSystem {
 
     const remote = await this.statRemoteRequired(this.config.remoteRoot, 'initialize')
     if (!remote.isDir) throw new Error(`drive9-dsh: remoteRoot "${this.config.remoteRoot}" is not a directory`)
+    if (this.config.mountConsistency === 'eventual') {
+      this.ctx.logger('drive9-dsh').warn(
+        'eventual mount consistency enabled: subprocess paths may remain stale for more than 30 seconds after SDK writes',
+      )
+    }
     if (this.config.verifyCoherence) await this.proveCoherence()
   }
 
@@ -565,21 +580,57 @@ export class Drive9FileSystem extends FileSystem {
     }
   }
 
-  private async waitForMountBytes(processPath: string, expected: Uint8Array): Promise<void> {
+  private async waitForMountBytes(
+    processPath: string,
+    expected: Uint8Array,
+    policy: 'profile' | 'required' = 'profile',
+  ): Promise<void> {
+    if (this.config.mountConsistency === 'eventual' && policy === 'profile') return
     const deadline = Date.now() + this.config.coherenceTimeoutMs
     while (true) {
       try {
-        const actual = await readFile(processPath)
-        if (actual.equals(Buffer.from(expected))) return
+        const info = await this.waitForMountOperation(() => this.mountStat(processPath), deadline, processPath)
+        if (info.isFile()) {
+          const actual = await this.waitForMountOperation(() => this.mountReadFile(processPath), deadline, processPath)
+          if (actual.equals(Buffer.from(expected))) return
+        }
       } catch (error: unknown) {
         const code = error instanceof Error && 'code' in error ? error.code : undefined
         if (code !== 'ENOENT' && code !== 'ENOTDIR') throw this.mapFsError(error, 'verify', processPath)
       }
-      if (Date.now() >= deadline) {
-        throw new FsError(`Drive9 mount did not expose committed bytes for "${processPath}"`, 'FS_IO_ERROR')
-      }
+      if (Date.now() >= deadline) throw this.mountCoherenceTimeout(processPath)
       await new Promise(resolveSleep => setTimeout(resolveSleep, this.config.coherencePollMs))
     }
+  }
+
+  protected mountStat(processPath: string): ReturnType<typeof localStat> {
+    return localStat(processPath)
+  }
+
+  protected mountReadFile(processPath: string): Promise<Buffer> {
+    return readFile(processPath)
+  }
+
+  private async waitForMountOperation<T>(operation: () => Promise<T>, deadline: number, processPath: string): Promise<T> {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw this.mountCoherenceTimeout(processPath)
+    return await new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(this.mountCoherenceTimeout(processPath)), remaining)
+      operation().then(
+        value => {
+          clearTimeout(timer)
+          resolve(value)
+        },
+        error => {
+          clearTimeout(timer)
+          reject(error)
+        },
+      )
+    })
+  }
+
+  private mountCoherenceTimeout(processPath: string): FsError {
+    return new FsError(`Drive9 mount did not expose committed bytes for "${processPath}"`, 'FS_IO_ERROR')
   }
 
   private async waitForSdkBytes(remotePath: string, expected: Uint8Array, newerThan: number): Promise<number> {
@@ -627,7 +678,7 @@ export class Drive9FileSystem extends FileSystem {
     try {
       const firstRevision = await this.client.writeWithRevision(remotePath, first, { expectedRevision: 0 })
       created = true
-      await this.waitForMountBytes(processPath, first)
+      await this.waitForMountBytes(processPath, first, 'required')
       await writeFile(processPath, second)
       const handle = await open(processPath, 'r')
       try {
@@ -636,7 +687,7 @@ export class Drive9FileSystem extends FileSystem {
         await handle.close()
       }
       await this.waitForSdkBytes(remotePath, second, firstRevision)
-      await this.client.delete(remotePath)
+      await unlink(processPath)
       await this.waitForProbeDeletion(remotePath, processPath)
       created = false
     } catch (error: unknown) {

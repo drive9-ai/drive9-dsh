@@ -26,14 +26,25 @@ npm pack --dry-run
 npm audit --omit=dev
 ```
 
-Run `DRIVE9_REAL_E2E=1 npm run test:real` only with a real Drive9 mount and dedicated
-test roots. See [docs/operations.md](docs/operations.md).
+Run `DRIVE9_REAL_E2E=1 npm run test:real` only on Linux with a real Drive9 FUSE mount
+created using `drive9 mount --mode=fuse --profile=none` and dedicated test roots. The
+test rejects WebDAV, ordinary local directories, and non-Linux hosts. See
+[docs/operations.md](docs/operations.md).
+
+Before publishing a release candidate, record the exact package and Drive9 CLI
+commits, the non-skipped real-test pass count, and the reported propagation timings.
 
 ## Design constraints
 
 - Keep filesystem, evidence storage, and result tools independently importable.
 - Do not add a local-storage fallback when Drive9 startup validation fails.
 - Preserve Drive9 revision CAS for guarded mutations.
+- Preserve the mandatory startup proof and post-write mounted-byte wait for every
+  strong-profile write/edit path.
+- Keep WebDAV relaxation explicit as `mountConsistency: 'eventual'`, preserve its
+  runtime warning, and never silently downgrade `strong` or suppress an explicitly
+  requested proof.
+- Preserve SDK revision CAS in both consistency profiles.
 - Do not expose evidence paths, namespace listing, or possession-only authorization.
 - Keep model-facing reads and searches bounded by package hard limits.
 - Do not broaden V1 into a shell, sandbox, or LayerFS implementation.

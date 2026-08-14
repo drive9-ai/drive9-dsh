@@ -15,7 +15,7 @@
         remoteRoot: !!js process.env.DRIVE9_REMOTE_ROOT ?? '/'
         baseUrl: !!js process.env.DRIVE9_BASE_URL
         apiKey: !!js process.env.DRIVE9_WORKSPACE_API_KEY
-        verifyCoherence: true
+        mountConsistency: !!js process.env.DRIVE9_MOUNT_CONSISTENCY ?? 'strong'
 
     - id: drive9-evidence
       name: '@drive9-ai/drive9-dsh/evidence'
