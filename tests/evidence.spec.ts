@@ -2,10 +2,20 @@ import { Context } from '@deepseek-ai/cordis'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SaveTextSpill } from '@deepseek-ai/dsh-spill'
-import { describe, expect, it } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import { Drive9EvidenceStore } from '../src/evidence.js'
-import { extractReceipts } from '../src/receipt.js'
+import { Drive9FileSystem } from '../src/filesystem.js'
+import { encodeLocator, extractReceipts } from '../src/receipt.js'
 import { FakeDrive9Client, FakeStatusError } from './fake-drive9.js'
+
+const roots: string[] = []
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true })))
+})
 
 function input(overrides: Partial<SaveTextSpill> = {}): SaveTextSpill {
   return {
@@ -69,8 +79,15 @@ describe('Drive9EvidenceStore', () => {
       if (path.includes('/manifests/')) throw new FakeStatusError('manifest backend down', 503)
     }
     await expect(store.saveText(input())).rejects.toMatchObject({ code: 'DRIVE9_RESULT_IO' })
-    expect([...client.nodes].filter(([path]) => path.includes('/objects/') && path.endsWith('.txt'))).toHaveLength(1)
+    const objects = [...client.nodes].filter(([path]) => path.includes('/objects/') && path.endsWith('.txt'))
+    expect(objects).toHaveLength(1)
     expect([...client.nodes].filter(([path]) => path.includes('/manifests/') && path.endsWith('.json'))).toHaveLength(0)
+    const objectPath = objects[0]?.[0]
+    expect(objectPath).toBeDefined()
+    const capability = objectPath!.split('/').at(-1)!.slice(0, -'.txt'.length)
+    await expect(store.readPublished(encodeLocator(capability), 1024)).rejects.toMatchObject({
+      code: 'DRIVE9_RESULT_NOT_FOUND',
+    })
   })
 
   it('publishes no locator or manifest when content creation fails', async () => {
@@ -123,14 +140,27 @@ describe('Drive9EvidenceStore', () => {
     })
   })
 
-  it('keeps evidence readable after the workspace storage is deleted', async () => {
+  it('keeps evidence readable after the mounted Drive9 workspace file is deleted', async () => {
     const { store } = setup()
     await store.initialize()
     const ref = await store.saveText(input())
-    const workspace = new FakeDrive9Client()
-    workspace.mkdirRecord('/workspace')
-    workspace.setFile('/workspace/file.txt', 'ephemeral')
-    await workspace.delete('/workspace/file.txt')
+
+    const mountRoot = await mkdtemp(join(tmpdir(), 'drive9-dsh-evidence-isolation-'))
+    roots.push(mountRoot)
+    const workspace = new FakeDrive9Client({ mountRoot, remoteRoot: '/workspace' })
+    const workspaceFs = new Drive9FileSystem(new Context(), {
+      mountRoot,
+      remoteRoot: '/workspace',
+      apiKey: 'workspace-key',
+      verifyCoherence: false,
+    }, () => workspace)
+    await workspaceFs.initialize()
+    const target = await workspaceFs.resolve('file.txt')
+    await workspaceFs.writeText(target, 'ephemeral', { kind: 'createIfAbsent' })
+    await rm(workspaceFs.processPath(target))
+
+    expect(await workspaceFs.stat(target)).toBeUndefined()
+    expect([...workspace.nodes.keys()].some(path => path.startsWith('/evidence/'))).toBe(false)
     expect((await store.readPublished(ref.locator, 1024)).content).toContain('FAILED')
   })
 })

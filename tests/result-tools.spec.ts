@@ -7,7 +7,14 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 import { Drive9EvidenceStore } from '../src/evidence.js'
-import resultTools from '../src/result-tools.js'
+import resultTools, {
+  apply as applyResultTools,
+  HARD_MAX_RETURN_BYTES,
+  HARD_MAX_RETURN_LINES,
+  HARD_MAX_SCAN_BYTES,
+  HARD_MAX_SEARCH_MATCHES,
+} from '../src/result-tools.js'
+import type { Drive9ResultToolsConfig } from '../src/result-tools.js'
 import { FakeDrive9Client } from './fake-drive9.js'
 
 function issuingEvents(callId: string, toolName: string, retrievalHint: string): SessionEvent[] {
@@ -43,7 +50,14 @@ function mockAgent(sessionId: string, events: SessionEvent[]): Agent {
   return { session } as unknown as Agent
 }
 
-async function setup() {
+const SMALL_LIMITS: Drive9ResultToolsConfig = {
+  maxReturnLines: 5,
+  maxReturnBytes: 1024,
+  maxSearchMatches: 3,
+  maxScanBytes: 4096,
+}
+
+async function setup(config: Drive9ResultToolsConfig = SMALL_LIMITS) {
   const client = new FakeDrive9Client()
   client.mkdirRecord('/evidence/dsh')
   const ctx = new Context()
@@ -55,12 +69,7 @@ async function setup() {
     }
   }
   await ctx.plugin(TestEvidenceStore, { apiKey: 'evidence-key' })
-  await ctx.plugin(resultTools, {
-    maxReturnLines: 5,
-    maxReturnBytes: 1024,
-    maxSearchMatches: 3,
-    maxScanBytes: 4096,
-  })
+  await ctx.plugin(resultTools, config)
   return { ctx, store: ctx.spillStore as Drive9EvidenceStore }
 }
 
@@ -123,5 +132,49 @@ describe('Drive9 result tools', () => {
       query: 'x'.repeat(65 * 1024),
     }, agent)
     expect(query).toMatchObject({ isError: true, error: { info: { code: 'DRIVE9_RESULT_SCAN_LIMIT' } } })
+  })
+
+  it('enforces the public hard ceilings and the default 64 KiB output cap', async () => {
+    const invalidConfigs: Drive9ResultToolsConfig[] = [
+      { maxReturnLines: HARD_MAX_RETURN_LINES + 1 },
+      { maxReturnBytes: HARD_MAX_RETURN_BYTES + 1 },
+      { maxSearchMatches: HARD_MAX_SEARCH_MATCHES + 1 },
+      { maxScanBytes: HARD_MAX_SCAN_BYTES + 1 },
+    ]
+    for (const config of invalidConfigs) {
+      expect(() => applyResultTools(new Context(), config)).toThrow(/must be an integer between/)
+    }
+
+    const { ctx, store } = await setup({})
+    const content = `${Array.from({ length: HARD_MAX_RETURN_LINES }, () => 'x'.repeat(200)).join('\n')}\n`
+    const ref = await store.saveText({
+      owner: { sessionId: SessionId('current') },
+      source: { toolName: 'exec', callId: CallId('source-call'), label: 'result' },
+      suggestedName: 'large.txt',
+      content,
+    })
+    const agent = mockAgent('current', issuingEvents('source-call', 'exec', ref.retrievalHint))
+
+    const read = await execute(ctx, 'result_read', {
+      result_id: ref.locator,
+      offset: 0,
+      limit: HARD_MAX_RETURN_LINES,
+    }, agent)
+    expect(read.isError).toBe(false)
+    expect(Buffer.byteLength(read.content[0]?.type === 'text' ? read.content[0].text : '', 'utf8'))
+      .toBeLessThanOrEqual(HARD_MAX_RETURN_BYTES)
+
+    const tooManyLines = await execute(ctx, 'result_read', {
+      result_id: ref.locator,
+      limit: HARD_MAX_RETURN_LINES + 1,
+    }, agent)
+    expect(tooManyLines).toMatchObject({ isError: true, error: { info: { code: 'DRIVE9_RESULT_SCAN_LIMIT' } } })
+
+    const tooManyMatches = await execute(ctx, 'result_search', {
+      result_id: ref.locator,
+      query: 'x',
+      max_matches: HARD_MAX_SEARCH_MATCHES + 1,
+    }, agent)
+    expect(tooManyMatches).toMatchObject({ isError: true, error: { info: { code: 'DRIVE9_RESULT_SCAN_LIMIT' } } })
   })
 })
