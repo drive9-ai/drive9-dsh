@@ -569,17 +569,40 @@ export class Drive9FileSystem extends FileSystem {
     const deadline = Date.now() + this.config.coherenceTimeoutMs
     while (true) {
       try {
-        const actual = await readFile(processPath)
-        if (actual.equals(Buffer.from(expected))) return
+        const info = await this.waitForMountOperation(() => localStat(processPath), deadline, processPath)
+        if (info.isFile()) {
+          const actual = await this.waitForMountOperation(() => readFile(processPath), deadline, processPath)
+          if (actual.equals(Buffer.from(expected))) return
+        }
       } catch (error: unknown) {
         const code = error instanceof Error && 'code' in error ? error.code : undefined
         if (code !== 'ENOENT' && code !== 'ENOTDIR') throw this.mapFsError(error, 'verify', processPath)
       }
-      if (Date.now() >= deadline) {
-        throw new FsError(`Drive9 mount did not expose committed bytes for "${processPath}"`, 'FS_IO_ERROR')
-      }
+      if (Date.now() >= deadline) throw this.mountCoherenceTimeout(processPath)
       await new Promise(resolveSleep => setTimeout(resolveSleep, this.config.coherencePollMs))
     }
+  }
+
+  private async waitForMountOperation<T>(operation: () => Promise<T>, deadline: number, processPath: string): Promise<T> {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw this.mountCoherenceTimeout(processPath)
+    return await new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(this.mountCoherenceTimeout(processPath)), remaining)
+      operation().then(
+        value => {
+          clearTimeout(timer)
+          resolve(value)
+        },
+        error => {
+          clearTimeout(timer)
+          reject(error)
+        },
+      )
+    })
+  }
+
+  private mountCoherenceTimeout(processPath: string): FsError {
+    return new FsError(`Drive9 mount did not expose committed bytes for "${processPath}"`, 'FS_IO_ERROR')
   }
 
   private async waitForSdkBytes(remotePath: string, expected: Uint8Array, newerThan: number): Promise<number> {

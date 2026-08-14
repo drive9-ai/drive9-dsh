@@ -1,4 +1,4 @@
-import { Client } from 'drive9'
+import { Client, Drive9Error } from 'drive9'
 import type { BatchStatResult, FileInfo, StatResult, WriteOptions } from 'drive9'
 
 export interface Drive9Client {
@@ -17,9 +17,12 @@ export type Drive9ClientFactory = (baseUrl: string | undefined, apiKey: string |
 export const defaultClientFactory: Drive9ClientFactory = (baseUrl, apiKey) => new Client(baseUrl, apiKey)
 
 export function statusCodeOf(error: unknown): number | undefined {
-  if (error === null || typeof error !== 'object' || !('statusCode' in error)) return undefined
-  const statusCode = (error as { statusCode?: unknown }).statusCode
-  return typeof statusCode === 'number' ? statusCode : undefined
+  if (error !== null && typeof error === 'object' && 'statusCode' in error) {
+    const statusCode = (error as { statusCode?: unknown }).statusCode
+    if (typeof statusCode === 'number') return statusCode
+  }
+  if (error instanceof Drive9Error && error.message.startsWith('not found: ')) return 404
+  return undefined
 }
 
 export function isConflict(error: unknown): boolean {

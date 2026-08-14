@@ -2,8 +2,18 @@
 
 ## Execution-world requirement
 
-Mount Drive9 before DeepSeek Harness starts. The Harness process, its subprocess
-provider, and every process-backed tool must see the same mount path.
+V1 requires Linux with `/dev/fuse` and `fusermount3`. Mount Drive9 before DeepSeek
+Harness starts with the strong-consistency profile:
+
+```bash
+mkdir -p /mnt/drive9
+DRIVE9_API_KEY="$DRIVE9_WORKSPACE_API_KEY" \
+  drive9 mount --mode=fuse --profile=none :/workspace /mnt/drive9
+```
+
+The Harness process, its subprocess provider, and every process-backed tool must see
+that same mount path. `--profile=none` prevents a local coding-agent overlay from
+splitting process paths from Drive9 SDK operations.
 
 For a container deployment, prefer this order:
 
@@ -13,8 +23,11 @@ For a container deployment, prefer this order:
 4. start the selected DSH profile;
 5. let `Drive9FileSystem` complete its bidirectional coherence probe.
 
-Do not point `DRIVE9_MOUNT_ROOT` at an ordinary local directory. Startup deliberately
-tests SDK-to-mount and mount-to-SDK visibility and rejects split worlds.
+Do not point `DRIVE9_MOUNT_ROOT` at an ordinary local directory, WebDAV mount, or
+local-overlay profile. Startup deliberately tests SDK-to-mount and mount-to-SDK
+visibility and rejects split worlds. macOS WebDAVFS is explicitly unsupported: real
+validation observed the Drive9 bridge receive an SDK write immediately while mounted
+`open`/`stat` remained stale or blocked for more than 30 seconds.
 
 ## Credential separation
 
@@ -67,6 +80,7 @@ have deliberately different deletion semantics.
 Treat failure to load the filesystem component as a deployment failure. Common causes:
 
 - mount absent or not writable;
+- non-Linux, non-FUSE, WebDAV, or local-overlay mount profile;
 - remote root absent;
 - workspace credential missing required access;
 - mount and SDK credentials refer to different tenants or roots;
@@ -74,13 +88,15 @@ Treat failure to load the filesystem component as a deployment failure. Common c
 - evidence root missing or evidence credential denied.
 
 The coherence probe uses a unique hidden filename, deletes it on success, and attempts
-best-effort cleanup after failure. Do not disable `verifyCoherence` in production unless
-the deployment has an equivalent external proof and accepts the weaker startup gate.
+best-effort cleanup after failure. Do not disable `verifyCoherence` in production.
+Disabling the probe does not make WebDAV, a local overlay, or a split SDK/process world
+supported.
 
 ## Real-service test
 
-The opt-in test is excluded from the default suite. It requires a real mounted subtree
-and a dedicated evidence-test root:
+The opt-in test is excluded from the default suite. It requires a real Linux Drive9
+FUSE subtree mounted with `--mode=fuse --profile=none` and a dedicated evidence-test
+root. The test rejects non-Linux hosts and non-FUSE mount roots:
 
 ```bash
 export DRIVE9_REAL_E2E=1
@@ -96,11 +112,18 @@ npm run test:real
 
 The test:
 
-1. runs the startup coherence proof;
-2. writes with Drive9 revision CAS;
-3. reads identical bytes through the SDK, local file API, and `/bin/cat`;
-4. creates and verifies one evidence artifact;
-5. deletes the temporary workspace file.
+1. verifies that the mount root is Linux FUSE;
+2. runs the startup bidirectional coherence proof;
+3. writes with Drive9 revision CAS and waits for exact mounted bytes;
+4. reads identical bytes through the SDK, local file API, and `/bin/cat`;
+5. overwrites and closes the mounted file, then waits for a newer SDK revision with
+   exact bytes;
+6. creates and verifies one evidence artifact;
+7. deletes the temporary workspace file.
 
 The evidence artifact remains for retention testing. Use a disposable evidence root or
 operator cleanup policy for repeated runs.
+
+For every release candidate, record the exact package commit, exact Drive9 CLI commit,
+non-skipped real-test pass count, and SDK-to-mount plus mount-close-to-SDK timings. Do
+not publish from fake-only or WebDAV validation.

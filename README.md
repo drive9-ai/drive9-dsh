@@ -9,9 +9,15 @@ Persistent agent workspaces and durable, bounded tool evidence for
 - an isolated evidence backend for oversized tool results;
 - model-visible `result_search` and `result_read` tools with hard output limits.
 
-Drive9 does **not** provide a shell or sandbox. Mount Drive9 inside the same container,
-VM, or host where Harness process tools run. The integration proves that the SDK and
-mount expose the same bytes before it starts.
+Drive9 does **not** provide a shell or sandbox. V1 supports one strong execution-world
+profile: a Linux Drive9 FUSE mount inside the same container, VM, or host where Harness
+process tools run. The integration proves that the SDK and FUSE mount expose the same
+bytes before it starts.
+
+WebDAV mounts, including macOS WebDAVFS, are not supported for the combined
+SDK-revision-CAS and subprocess read-your-writes contract. In real validation the
+Drive9 WebDAV bridge observed an SDK write immediately while the macOS mounted
+`open`/`stat` view remained stale or blocked for more than 30 seconds.
 
 ## Why
 
@@ -35,7 +41,8 @@ evidence namespace.
 
 ### 1. Mount the workspace
 
-Configure Drive9, create the remote root once, and mount it into the Harness runtime:
+Configure Drive9, create the remote root once, and mount it into the Harness runtime.
+V1 requires Linux with `/dev/fuse` and `fusermount3` available:
 
 ```bash
 drive9 ctx add \
@@ -47,12 +54,17 @@ drive9 fs mkdir :/workspace
 mkdir -p /mnt/drive9
 
 DRIVE9_API_KEY="$DRIVE9_WORKSPACE_API_KEY" \
-  drive9 mount :/workspace /mnt/drive9
+  drive9 mount --mode=fuse --profile=none :/workspace /mnt/drive9
 ```
 
 The mount must exist in the **same execution world** as Harness subprocesses. If
 Harness runs inside a container, mount Drive9 inside that container or bind the mount
 into it before Harness starts.
+
+`--profile=none` is part of the supported profile. A coding-agent mount profile can
+route process paths through a local overlay while SDK calls still address Drive9,
+splitting the two sides of the revision-CAS contract. Do not substitute WebDAV or a
+local-overlay profile, and do not disable the startup proof to make one start.
 
 ### 2. Prepare isolated evidence storage
 
@@ -237,6 +249,8 @@ V1 intentionally does not provide:
 
 - a shell, process sandbox, terminal, or language server;
 - automatic Drive9 mounting;
+- WebDAV or local-overlay support for the filesystem component's strong consistency
+  contract;
 - LayerFS checkpoints or workspace rollback;
 - source-streaming or crash-recoverable tool capture;
 - exactly-once external tool side effects;
@@ -260,7 +274,8 @@ The default suite includes a scripted **real Harness agent loop**: the model use
 stock filesystem tool, `/bin/cat` reads the same mounted bytes, an oversized result is
 spilled, and later model steps invoke `result_search` and `result_read`.
 
-For a real Drive9 service and mount:
+For a real Drive9 service and Linux FUSE mount created with
+`drive9 mount --mode=fuse --profile=none`:
 
 ```bash
 DRIVE9_REAL_E2E=1 npm run test:real
@@ -268,13 +283,14 @@ DRIVE9_REAL_E2E=1 npm run test:real
 
 Required environment and cleanup behavior are documented in
 [docs/operations.md](docs/operations.md). See [CONTRIBUTING.md](CONTRIBUTING.md) for
-the release checklist.
+the release checklist. The real test rejects non-Linux and non-FUSE mount roots.
 
 ## Compatibility
 
 - Node.js 22.19 or newer
 - DeepSeek Harness `0.1.0-rc.6`
 - Drive9 JavaScript SDK `0.1.4`
+- Linux Drive9 FUSE mount in the Harness execution world
 
 DeepSeek Harness is a developer preview. Upstream service-contract changes require a
 new package release and contract review.

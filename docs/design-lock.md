@@ -12,7 +12,9 @@ Source baselines:
 
 Drive9 supplies a persistent workspace and durable evidence. It does not supply a shell, process sandbox, language server, or compute runtime.
 
-The workspace is mounted before DeepSeek Harness starts. The mount and every process-backed Harness capability run in the same host, container, or VM. A deployment that cannot meet this condition must not load the workspace plugin.
+The workspace is mounted before DeepSeek Harness starts. The V1 strong-consistency profile is a Linux Drive9 FUSE mount created with `drive9 mount --mode=fuse --profile=none`. The mount and every process-backed Harness capability run in the same host, container, or VM. A deployment that cannot meet these conditions must not load the workspace plugin.
+
+WebDAV mounts are not a supported substitute. Real macOS WebDAVFS validation showed that the Drive9 bridge observed an SDK write immediately while the OS-mounted `open`/`stat` view remained stale or blocked for more than 30 seconds. Coding-agent local-overlay profiles are also unsupported because process paths may no longer address the same Drive9 objects as SDK operations. V1 does not silently downgrade either profile into weaker semantics.
 
 Evidence uses a separate Drive9 credential and an unmounted root. Workspace tools, `processPath()`, `fileUrl()`, shell commands, and workspace deletion cannot address evidence objects.
 
@@ -39,6 +41,8 @@ The single package keeps installation simple without merging unrelated responsib
 - an absolute process-visible `mountRoot`;
 - an absolute POSIX `remoteRoot` describing the same Drive9 subtree;
 - a Drive9 SDK client with access to that subtree.
+
+`mountRoot` must be backed by Linux FUSE and must not be a WebDAV mount, ordinary local directory, or coding-agent local overlay.
 
 `resolve()` canonicalizes through the mounted filesystem, follows existing symlinks, preserves a missing suffix below the nearest existing ancestor, and rejects lexical, symlink, prefix, NUL, and platform-separator escapes. Targets use an opaque provider-owned key. Consumers cannot manufacture or parse it.
 
@@ -75,6 +79,8 @@ The filesystem service does not become injectable until it has:
 5. removed the probe and confirmed cleanup.
 
 Failure aborts plugin startup. There is no automatic fallback to a host-local directory and no automatic downgrade to metadata-based local stale detection.
+
+The behavioral proof remains mandatory in the supported profile. Disabling it does not make WebDAV, a local overlay, or a split SDK/process world supported.
 
 The explicit fallback is to use DeepSeek Harness's own `fs-local`/`fs-sandbox` provider against a Drive9 mount. That separate profile is not implemented or advertised as strong Drive9 revision-CAS by this package.
 
@@ -156,8 +162,8 @@ The release must include discriminating tests for:
 8. evidence locator rejection by filesystem resolution/path methods.
 9. a real DeepSeek Harness agent loop in which the model uses the filesystem tool, a process-backed tool observes the same mounted bytes, an oversized result spills, and later model calls retrieve it with `result_search`/`result_read`.
 
-Hosted CI must run type checking, unit tests, the fake-Drive9 integration suite, package build, and `npm pack --dry-run`. A separately documented opt-in test exercises a real Drive9 mount and service.
+Hosted CI must run type checking, unit tests, the fake-Drive9 integration suite, package build, and `npm pack --dry-run`. A separately documented opt-in release test exercises a real Drive9 service and Linux FUSE mount, rejects other filesystem types, and proves both SDK-to-process and process-close-to-newer-SDK-revision propagation.
 
 ## Compatibility
 
-V1 targets the DeepSeek Harness `0.1.0-rc.6` contracts and Node.js 22.19 or newer. DeepSeek Harness is a developer preview; incompatible upstream service changes require a new package release and a fresh contract review.
+V1 targets the DeepSeek Harness `0.1.0-rc.6` contracts, Node.js 22.19 or newer, and a Linux Drive9 FUSE mount in the Harness execution world. DeepSeek Harness is a developer preview; incompatible upstream service changes require a new package release and a fresh contract review.

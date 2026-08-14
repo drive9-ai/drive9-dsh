@@ -21,20 +21,24 @@ interface NodeRecord {
 export interface FakeDrive9Options {
   mountRoot?: string
   remoteRoot?: string
+  mirrorWrites?: boolean
 }
 
 export class FakeDrive9Client implements Drive9Client {
   readonly nodes = new Map<string, NodeRecord>()
   readonly batchStatCalls: string[][] = []
   beforeWrite: ((path: string, data: Uint8Array, expectedRevision: number | undefined) => void | Promise<void>) | undefined
+  afterWrite: ((path: string, data: Uint8Array, revision: number) => void | Promise<void>) | undefined
   beforeRead: ((path: string) => void | Promise<void>) | undefined
   private revision = 1
   private readonly mountRoot: string | undefined
   private readonly remoteRoot: string | undefined
+  private readonly mirrorWrites: boolean
 
   constructor(options: FakeDrive9Options = {}) {
     this.mountRoot = options.mountRoot
     this.remoteRoot = options.remoteRoot
+    this.mirrorWrites = options.mirrorWrites ?? true
     this.mkdirRecord('/')
     if (options.remoteRoot !== undefined) this.mkdirRecord(options.remoteRoot)
   }
@@ -59,6 +63,7 @@ export class FakeDrive9Client implements Drive9Client {
     const revision = this.revision++
     this.nodes.set(normalized, { data: Uint8Array.from(data), isDir: false, revision })
     await this.writeMount(normalized, data)
+    await this.afterWrite?.(normalized, data, revision)
     return revision
   }
 
@@ -170,6 +175,7 @@ export class FakeDrive9Client implements Drive9Client {
   }
 
   private async writeMount(remotePath: string, data: Uint8Array): Promise<void> {
+    if (!this.mirrorWrites) return
     const local = this.localPath(remotePath)
     if (local === undefined) return
     await mkdir(dirname(local), { recursive: true })
