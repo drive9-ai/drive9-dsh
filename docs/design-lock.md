@@ -90,7 +90,9 @@ The evidence client and root are separate from the workspace client and mount. T
 
 ### Authorization
 
-`result_read` and `result_search` require a live agent and authorize a capability only when its exact opaque locator appears in a prior `tool/result` or `tool/code-dispatch` text block in that agent's immutable session log.
+`result_read` and `result_search` require a live agent and an exact locator argument; neither tool scans an evidence namespace or a session's artifacts. Authorization never follows from arbitrary text containing a locator. It requires a Drive9 integration-authored evidence receipt in a prior `tool/result` or `tool/code-dispatch` record in the agent's immutable session log, plus a matching immutable Drive9 manifest.
+
+The receipt is a strictly parsed, versioned record emitted by `saveText()` through its retrieval hint. Its locator, producing session, tool name, call id, and manifest digest must match the immutable manifest and the enclosing Harness event. A copied string is not a grant: for a live record the manifest producer must equal the current session, and for an inherited record it must equal the session's declared direct `parentSession` and appear before the durable `seedLength` boundary. A caller that constructs a seed manually is trusted same-process composition code under the Harness session contract; model/tool output cannot mark current text as seeded history.
 
 The authorization set is:
 
@@ -98,9 +100,9 @@ The authorization set is:
 current-session issued locators + explicitly seeded inherited locators
 ```
 
-It is not based on `manifest.sessionId`. A fork may read a parent's locator only when that locator is present in the child's seeded event prefix. A guessed locator, a parent locator absent from the seed, and a sibling locator are denied. There is no artifact enumeration API and a child never re-owns inherited evidence.
+`manifest.sessionId` is a provenance input, never sufficient authorization by itself. A fork may read a parent's locator only when the integration receipt is present in the child's seeded event prefix and the manifest producer is that declared parent. A guessed locator, a parent locator absent from the seed, and a sibling locator are denied. There is no artifact enumeration API and a child never re-owns inherited evidence.
 
-The current tool call's arguments and arbitrary user/assistant text do not grant access.
+The current tool call's arguments and arbitrary user, assistant, or tool text do not grant access. In particular, echoing a well-formed sibling locator or copied receipt in a later tool result does not satisfy the producer/call/event provenance checks.
 
 ### Retrieval limits
 
@@ -150,7 +152,7 @@ The release must include discriminating tests for:
 4. strict text decoding, binary rejection, bounded reads, stable listing, abort, permission, and backend failure mapping.
 5. evidence unique-create publication, digest verification, bounded read/search, and storage or manifest-publication failure without a readable locator or session-log publication.
 6. shell deletion of the workspace while evidence remains readable.
-7. same-session unissued locator denial, unseeded parent denial, sibling denial, and seeded inherited locator success.
+7. same-session unissued locator denial, plain-text tool echo denial, unseeded parent denial, sibling denial, and seeded direct-parent locator success.
 8. evidence locator rejection by filesystem resolution/path methods.
 9. a real DeepSeek Harness agent loop in which the model uses the filesystem tool, a process-backed tool observes the same mounted bytes, an oversized result spills, and later model calls retrieve it with `result_search`/`result_read`.
 
