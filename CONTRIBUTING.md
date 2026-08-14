@@ -34,6 +34,39 @@ test rejects WebDAV, ordinary local directories, and non-Linux hosts. See
 Before publishing a release candidate, record the exact package and Drive9 CLI
 commits, the non-skipped real-test pass count, and the reported propagation timings.
 
+## Public release
+
+The package is published as a prebuilt public npm artifact. Do not publish TypeScript
+sources or ask users to approve a Git dependency's build script.
+
+Run the non-publishing release gate from a clean worktree:
+
+```bash
+npm run release:check
+```
+
+The release owner creates or owns the npm `drive9` organization, enables 2FA, and
+logs in locally. Never send an npm password, OTP, or token through chat or commit it to
+the repository. To run the same gate and publish the exact `package.json` version:
+
+```bash
+npm login
+npm run release:publish
+```
+
+The script refuses a dirty worktree, an unexpected package name, a missing npm login,
+and a version that already exists. It runs the complete validation suite, shows the
+tarball contents, prompts for confirmation, and publishes with `--access public` to
+the public npm registry.
+
+After publication, verify the registry artifact rather than the local checkout:
+
+```bash
+npm view @drive9/drive9-dsh version
+dsh plugin --profile web add @drive9/drive9-dsh
+dsh web --dump-config
+```
+
 ## Design constraints
 
 - Keep filesystem, evidence storage, and result tools independently importable.
