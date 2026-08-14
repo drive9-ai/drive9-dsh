@@ -1,6 +1,8 @@
 import { Client, Drive9Error } from 'drive9'
 import type { BatchStatResult, FileInfo, StatResult, WriteOptions } from 'drive9'
 
+const DRIVE9_SDK_NOT_FOUND_MESSAGE_PREFIX = 'not found: '
+
 export interface Drive9Client {
   writeWithRevision(path: string, data: Uint8Array, options?: number | WriteOptions): Promise<number>
   read(path: string): Promise<Uint8Array>
@@ -21,7 +23,7 @@ export function statusCodeOf(error: unknown): number | undefined {
     const statusCode = (error as { statusCode?: unknown }).statusCode
     if (typeof statusCode === 'number') return statusCode
   }
-  if (error instanceof Drive9Error && error.message.startsWith('not found: ')) return 404
+  if (error instanceof Drive9Error && error.message.startsWith(DRIVE9_SDK_NOT_FOUND_MESSAGE_PREFIX)) return 404
   return undefined
 }
 

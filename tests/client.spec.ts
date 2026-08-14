@@ -11,6 +11,10 @@ describe('statusCodeOf', () => {
     expect(statusCodeOf(new Drive9Error('not found: /workspace/missing.txt'))).toBe(404)
   })
 
+  it('requires the exact Drive9 SDK not-found message prefix', () => {
+    expect(statusCodeOf(new Drive9Error('not found /workspace/missing.txt'))).toBeUndefined()
+  })
+
   it('does not infer status from unrelated errors', () => {
     expect(statusCodeOf(new Error('not found: /workspace/missing.txt'))).toBeUndefined()
   })

@@ -29,6 +29,11 @@ Do not point a strong profile at an ordinary local directory, WebDAV mount, or
 local-overlay profile. Startup deliberately tests SDK-to-mount and mount-to-SDK
 visibility and fails rather than downgrading a split world.
 
+Current real-service release validation observed SDK-to-mounted-byte convergence in
+1.3–1.5 seconds and mount-close-to-new-SDK-revision convergence in 0.36–0.40 seconds.
+These measurements are operational evidence, not an SLA; the strong profile still
+fails closed at the configured coherence timeout.
+
 ### Eventual WebDAV
 
 To accept relaxed subprocess visibility, mount with WebDAV and opt in explicitly:

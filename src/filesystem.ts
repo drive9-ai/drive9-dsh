@@ -580,14 +580,18 @@ export class Drive9FileSystem extends FileSystem {
     }
   }
 
-  private async waitForMountBytes(processPath: string, expected: Uint8Array): Promise<void> {
-    if (this.config.mountConsistency === 'eventual') return
+  private async waitForMountBytes(
+    processPath: string,
+    expected: Uint8Array,
+    policy: 'profile' | 'required' = 'profile',
+  ): Promise<void> {
+    if (this.config.mountConsistency === 'eventual' && policy === 'profile') return
     const deadline = Date.now() + this.config.coherenceTimeoutMs
     while (true) {
       try {
-        const info = await this.waitForMountOperation(() => localStat(processPath), deadline, processPath)
+        const info = await this.waitForMountOperation(() => this.mountStat(processPath), deadline, processPath)
         if (info.isFile()) {
-          const actual = await this.waitForMountOperation(() => readFile(processPath), deadline, processPath)
+          const actual = await this.waitForMountOperation(() => this.mountReadFile(processPath), deadline, processPath)
           if (actual.equals(Buffer.from(expected))) return
         }
       } catch (error: unknown) {
@@ -597,6 +601,14 @@ export class Drive9FileSystem extends FileSystem {
       if (Date.now() >= deadline) throw this.mountCoherenceTimeout(processPath)
       await new Promise(resolveSleep => setTimeout(resolveSleep, this.config.coherencePollMs))
     }
+  }
+
+  protected mountStat(processPath: string): ReturnType<typeof localStat> {
+    return localStat(processPath)
+  }
+
+  protected mountReadFile(processPath: string): Promise<Buffer> {
+    return readFile(processPath)
   }
 
   private async waitForMountOperation<T>(operation: () => Promise<T>, deadline: number, processPath: string): Promise<T> {
@@ -666,7 +678,7 @@ export class Drive9FileSystem extends FileSystem {
     try {
       const firstRevision = await this.client.writeWithRevision(remotePath, first, { expectedRevision: 0 })
       created = true
-      await this.waitForMountBytes(processPath, first)
+      await this.waitForMountBytes(processPath, first, 'required')
       await writeFile(processPath, second)
       const handle = await open(processPath, 'r')
       try {

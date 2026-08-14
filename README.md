@@ -313,11 +313,13 @@ the release checklist. The real test rejects non-Linux and non-FUSE mount roots.
 
 ## Compatibility
 
-- Node.js 22.19 or newer
-- DeepSeek Harness `0.1.0-rc.6`
-- Drive9 JavaScript SDK `0.1.4`
-- Linux Drive9 FUSE for the default strong profile
-- WebDAV for the explicit eventual profile
+| Component or profile | Supported contract |
+| --- | --- |
+| Node.js | 22.19 or newer |
+| DeepSeek Harness | `0.1.0-rc.6` |
+| Drive9 JavaScript SDK | `0.1.4` |
+| `strong` | Linux Drive9 FUSE; writes wait for exact process-visible bytes. Current real-service validation observed SDK-to-mount convergence in 1.3–1.5 seconds and mount-close-to-new-SDK-revision convergence in 0.36–0.40 seconds. These observations are not an SLA. |
+| `eventual` | WebDAV; no subprocess read-your-writes guarantee, with observed staleness beyond 30 seconds. |
 
 DeepSeek Harness is a developer preview. Upstream service-contract changes require a
 new package release and contract review.
