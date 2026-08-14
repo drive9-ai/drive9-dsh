@@ -185,7 +185,3 @@ export function apply(ctx: Context, config: Drive9ResultToolsConfig = {}): void 
     },
   }))
 }
-
-const plugin = Object.assign(apply, { inject, Config })
-
-export default plugin

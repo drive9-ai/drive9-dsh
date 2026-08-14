@@ -27,3 +27,8 @@
 
     - id: drive9-result-tools
       name: '@drive9-ai/drive9-dsh/result-tools'
+
+    - id: drive9-runtime-context
+      name: '@drive9-ai/drive9-dsh/runtime-context'
+      config:
+        mountConsistency: !!js process.env.DRIVE9_MOUNT_CONSISTENCY ?? 'strong'

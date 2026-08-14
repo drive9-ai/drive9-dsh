@@ -25,6 +25,18 @@ For a container deployment, prefer this order:
 4. start the selected DSH profile;
 5. let `Drive9FileSystem` complete its bidirectional coherence probe.
 
+Use the standard DSH bundle flow; no Drive9-specific launcher is required:
+
+```bash
+dsh plugin --profile web add @drive9-ai/drive9-dsh
+dsh web --dump-config
+dsh web
+```
+
+Before startup, inspect the dump and require exactly one active `fs` provider,
+`@drive9-ai/drive9-dsh/filesystem`. The stock sandbox-policy service remains active;
+the Drive9 provider itself enforces its per-call mutation policy.
+
 Do not point a strong profile at an ordinary local directory, WebDAV mount, or
 local-overlay profile. Startup deliberately tests SDK-to-mount and mount-to-SDK
 visibility and fails rather than downgrading a split world.
@@ -50,7 +62,8 @@ SDK-backed model reads, writes, revision CAS, and evidence remain authoritative.
 filesystem call returns when the SDK CAS commits and does not wait for WebDAV to
 converge. The process-visible path may remain stale for more than 30 seconds. Do not
 use this profile when an agent writes and immediately validates through `cat`, `rg`,
-tests, a language server, or another subprocess. Startup logs this limitation.
+tests, a language server, or another subprocess. Startup logs this limitation and
+places the same warning in the model-visible runtime-context snapshot.
 
 ## Credential separation
 
@@ -113,6 +126,12 @@ Treat failure to load the filesystem component as a deployment failure. Common c
 In `strong`, the coherence probe uses a unique hidden filename, deletes it on success,
 and attempts best-effort cleanup after failure. Do not disable `verifyCoherence` in a
 strong production deployment.
+
+A successful strong mutation means both the Drive9 SDK commit and exact mounted-byte
+verification succeeded. `DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED` means the
+workspace revision committed but the runtime path could not be confirmed. It includes
+`workspaceCommitted: true`, the committed version, and a reason. Treat it as a
+reconciliation case, never as evidence that a retry is safe.
 
 In `eventual`, the proof defaults off and the package emits a warning. Explicitly
 setting `verifyCoherence: true` still runs it and does not suppress a failure. There is

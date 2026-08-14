@@ -3,11 +3,26 @@
 Persistent agent workspaces and durable, bounded tool evidence for
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-`@drive9-ai/drive9-dsh` is one install with three independent Cordis components:
+`@drive9-ai/drive9-dsh` is a standard DSH bundle with four independent Cordis components:
 
 - a Drive9 revision-CAS filesystem for Harness `read`, `write`, and `edit` tools;
 - an isolated evidence backend for oversized tool results;
-- model-visible `result_search` and `result_read` tools with hard output limits.
+- model-visible `result_search` and `result_read` tools with hard output limits;
+- a model-visible runtime-context warning for the opt-in eventual mount profile.
+
+The architecture keeps four lifecycles separate:
+
+| Layer | Owner |
+| --- | --- |
+| Agent loop | DeepSeek Harness |
+| Session and conversation history | DeepSeek Harness |
+| Persistent workspace and immutable evidence | Drive9 |
+| Shell, sandbox, language servers, and compute runtime | the user's DSH deployment |
+
+The Drive9 mount only exposes the persistent workspace inside an existing runtime.
+It does not create, own, or keep that runtime alive. Evidence remains readable after
+the runtime or workspace disappears because it is stored under a separate, unmounted
+Drive9 root.
 
 Drive9 does **not** provide a shell or sandbox. V1 exposes two explicit mount-consistency
 profiles:
@@ -105,11 +120,13 @@ token scopes.
 dsh plugin --profile web add @drive9-ai/drive9-dsh
 ```
 
-The package declares a DSH bundle, so `dsh plugin` installs it and adds its
+The package declares a DSH bundle, so the standard `dsh plugin` command installs it and adds its
 `cordis.patch.yml` layer to the selected profile. The bundle disables the stock
-`fs-sandbox` and `spill-local` providers, then installs the Drive9 filesystem,
+`fs-sandbox` and `spill-local` storage providers, then installs the Drive9 filesystem,
 evidence backend, and result tools. Harness's stock filesystem tools, subprocess
-runtime, observation policy, and spill policy remain in place.
+runtime, sandbox policy, observation policy, and spill policy remain in place. The
+Drive9 filesystem implements the same per-call `read-only`, `workspace-write`, and
+`danger-full-access` mutation policy that the replaced filesystem provider enforced.
 
 ### 4. Configure and run
 
@@ -120,8 +137,14 @@ export DRIVE9_REMOTE_ROOT="/workspace"
 export DRIVE9_EVIDENCE_ROOT="/evidence/dsh"
 
 cd "$DRIVE9_MOUNT_ROOT"
-dsh --profile web
+dsh web --dump-config
+dsh web
 ```
+
+`dsh web --dump-config` is the recommended preflight. Its composed tree must contain
+exactly one active `fs` provider: `@drive9-ai/drive9-dsh/filesystem`. Custom profiles
+use the equivalent `dsh --profile <name> --dump-config` and `dsh --profile <name>`
+commands; no Drive9-specific launcher is required.
 
 In the default strong profile, startup fails instead of falling back or weakening the
 contract when:
@@ -132,8 +155,9 @@ contract when:
 - mount writes do not produce a newer Drive9 revision through the SDK.
 
 The eventual profile still validates the local mount directory and remote Drive9 root,
-logs a prominent warning, and skips the bidirectional proof by default. Explicitly
-setting `verifyCoherence: true` still runs the proof and propagates any failure.
+logs a prominent warning, adds the same warning to the model's durable runtime-context
+snapshot, and skips the bidirectional proof by default. Explicitly setting
+`verifyCoherence: true` still runs the complete proof and propagates any failure.
 
 ## Components
 
@@ -151,9 +175,15 @@ setting `verifyCoherence: true` still runs the proof and propagates any failure.
 | `listDir` | Stable sorting and `batchStat` requests capped at 256 paths |
 | guarded write/edit | Exact Drive9 revision CAS |
 | unconditional write/edit | Bounded read/modify/CAS retry |
+| mutation policy | DSH per-call sandbox policy, rechecked against the fresh canonical target |
 
-In `strong`, a successful SDK write returns only after the mounted path exposes the
-same bytes. In `eventual`, it returns after the SDK CAS succeeds; `processPath()` and
+In `strong`, ordinary success returns only after the SDK write commits and the mounted
+path exposes the same bytes. If Drive9 commits but the mount cannot be confirmed before
+the bounded coherence deadline, the operation throws
+`DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED` with `workspaceCommitted: true`, the
+committed version, and reason `timeout`, `aborted`, or `io`. This is neither success nor
+evidence that the write did not happen; callers must inspect/reconcile rather than
+blindly retrying. In `eventual`, it returns after the SDK CAS succeeds; `processPath()` and
 `fileUrl()` remain available, but their mounted view has no read-your-writes guarantee.
 Both methods reject targets not authenticated by that filesystem instance.
 
@@ -207,11 +237,12 @@ The shipped bundle reads these environment variables:
 | `DRIVE9_EVIDENCE_API_KEY` | yes | — | Separate evidence-scoped credential |
 | `DRIVE9_EVIDENCE_ROOT` | no | `/evidence/dsh` | Unmounted evidence root |
 
-Programmatic composition is also supported:
+Programmatic composition is also supported inside a DSH context that already provides
+the standard `sandboxPolicy`, `systemPrompt`, and `tools` services:
 
 ```ts
 import { Context } from '@deepseek-ai/cordis'
-import Drive9Dsh from '@drive9-ai/drive9-dsh'
+import * as Drive9Dsh from '@drive9-ai/drive9-dsh'
 
 const ctx = new Context()
 
@@ -242,6 +273,10 @@ workspace and evidence.
 Filesystem failures use Harness `FS_*` codes, including `FS_STALE_VERSION`,
 `FS_NOT_OBSERVED`, `FS_PERMISSION_DENIED`, `FS_TOO_LARGE`, `FS_NOT_TEXT`,
 `FS_ABORTED`, and `FS_IO_ERROR`.
+
+`DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED` is the distinct post-commit outcome for
+a strong-profile mount verification failure. It carries `workspaceCommitted: true` and
+must never be treated as a retry-safe “write did not happen” error.
 
 Evidence retrieval uses stable `DRIVE9_RESULT_*` codes:
 

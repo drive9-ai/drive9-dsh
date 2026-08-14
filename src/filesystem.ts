@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
 import { access, open, readFile, stat as localStat, unlink, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join, relative, sep } from 'node:path'
 import { posix } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -16,9 +16,13 @@ import type {
   FsWriteIntent,
   FsWriteOutcome,
 } from '@deepseek-ai/dsh-fs'
+import { writableRoots } from '@deepseek-ai/dsh-sandbox'
+import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type { StatResult } from 'drive9'
 import { defaultClientFactory, isConflict, statusCodeOf } from './client.js'
 import type { Drive9Client, Drive9ClientFactory } from './client.js'
+import { Drive9WorkspaceCommittedMountUnconfirmedError } from './mount-error.js'
 import { WorkspaceTargetCodec } from './path.js'
 import { applyLiteralEdit, decodeText, decodeTextStream, normalizeLineEndings, throwIfAborted } from './text.js'
 
@@ -27,6 +31,12 @@ const DEFAULT_CAS_ATTEMPTS = 4
 const DEFAULT_COHERENCE_TIMEOUT_MS = 10_000
 const DEFAULT_COHERENCE_POLL_MS = 50
 const MAX_BATCH_STAT_PATHS = 256
+
+class MountCoherenceTimeoutError extends FsError {
+  constructor(processPath: string) {
+    super(`Drive9 mount did not expose committed bytes for "${processPath}"`, 'FS_IO_ERROR')
+  }
+}
 
 export type Drive9MountConsistency = 'strong' | 'eventual'
 
@@ -111,7 +121,14 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function pathContained(parent: string, child: string): boolean {
+  const rel = relative(parent, child)
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+}
+
 export class Drive9FileSystem extends FileSystem {
+  static inject = ['sandboxPolicy']
+
   static Config: z<Drive9FileSystemConfig> = z.object({
     mountRoot: z.string().default('/mnt/drive9'),
     remoteRoot: z.string().default('/'),
@@ -128,6 +145,7 @@ export class Drive9FileSystem extends FileSystem {
   readonly config: ResolvedConfig
   readonly client: Drive9Client
   readonly targets: WorkspaceTargetCodec
+  private readonly defaultSandboxMode: SandboxMode
   private readonly locks = new Map<string, Promise<unknown>>()
 
   constructor(
@@ -139,6 +157,11 @@ export class Drive9FileSystem extends FileSystem {
     this.config = resolveConfig(config)
     this.client = clientFactory(this.config.baseUrl, this.config.apiKey)
     this.targets = new WorkspaceTargetCodec(this.config.mountRoot, this.config.remoteRoot)
+    this.defaultSandboxMode = ctx.sandboxPolicy.defaultMode
+  }
+
+  override get sandboxMode(): SandboxMode {
+    return this.defaultSandboxMode
   }
 
   protected async [Service.init](): Promise<void> {
@@ -349,7 +372,9 @@ export class Drive9FileSystem extends FileSystem {
     content: string,
     expected?: FsWriteIntent,
     signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
   ): Promise<FsWriteOutcome> {
+    target = await this.checkedTarget(target, sandboxPolicy, signal)
     if (content.includes('\0')) throw new FsError(`cannot write "${target.displayPath}": NUL is not text`, 'FS_NOT_TEXT')
     return this.withLock(String(target.targetKey), async () => {
       if (expected !== undefined) return this.guardedWrite(target, content, expected, signal)
@@ -367,7 +392,7 @@ export class Drive9FileSystem extends FileSystem {
             Buffer.from(content, 'utf8'),
             { expectedRevision: existing?.revision ?? 0 },
           )
-          await this.waitForMountBytes(decoded.processPath, Buffer.from(content, 'utf8'))
+          await this.confirmCommittedMount(decoded.processPath, Buffer.from(content, 'utf8'), revision, signal)
           return {
             operation: existing === undefined ? 'create' : 'update',
             version: revisionToken(revision),
@@ -388,7 +413,9 @@ export class Drive9FileSystem extends FileSystem {
     edit: FsEditRequest,
     expected?: { version: ReturnType<typeof FsVersion> },
     signal?: AbortSignal,
+    sandboxPolicy?: SandboxExecutionPolicy,
   ): Promise<FsEditOutcome> {
+    target = await this.checkedTarget(target, sandboxPolicy, signal)
     if (edit.oldString.includes('\0') || edit.newString.includes('\0')) {
       throw new FsError(`cannot edit "${target.displayPath}": NUL is not text`, 'FS_NOT_TEXT')
     }
@@ -409,7 +436,7 @@ export class Drive9FileSystem extends FileSystem {
             Buffer.from(edited.storage, 'utf8'),
             { expectedRevision: revision },
           )
-          await this.waitForMountBytes(decoded.processPath, Buffer.from(edited.storage, 'utf8'))
+          await this.confirmCommittedMount(decoded.processPath, Buffer.from(edited.storage, 'utf8'), nextRevision, signal)
           return { version: revisionToken(nextRevision), before: edited.before, after: edited.after }
         } catch (error: unknown) {
           if (isConflict(error)) throw new FsError(`cannot edit "${target.displayPath}": file changed since it was read`, 'FS_STALE_VERSION')
@@ -428,7 +455,7 @@ export class Drive9FileSystem extends FileSystem {
             Buffer.from(edited.storage, 'utf8'),
             { expectedRevision: existing.revision },
           )
-          await this.waitForMountBytes(decoded.processPath, Buffer.from(edited.storage, 'utf8'))
+          await this.confirmCommittedMount(decoded.processPath, Buffer.from(edited.storage, 'utf8'), nextRevision, signal)
           return { version: revisionToken(nextRevision), before: edited.before, after: edited.after }
         } catch (error: unknown) {
           if (isConflict(error)) continue
@@ -469,7 +496,7 @@ export class Drive9FileSystem extends FileSystem {
         Buffer.from(content, 'utf8'),
         { expectedRevision },
       )
-      await this.waitForMountBytes(decoded.processPath, Buffer.from(content, 'utf8'))
+      await this.confirmCommittedMount(decoded.processPath, Buffer.from(content, 'utf8'), revision, signal)
       return {
         operation: existing === undefined ? 'create' : 'update',
         version: revisionToken(revision),
@@ -558,7 +585,8 @@ export class Drive9FileSystem extends FileSystem {
     return info
   }
 
-  private mapFsError(error: unknown, verb: string, displayPath: string): FsError {
+  private mapFsError(error: unknown, verb: string, displayPath: string): Error {
+    if (error instanceof Drive9WorkspaceCommittedMountUnconfirmedError) return error
     if (error instanceof FsError) return error
     const status = statusCodeOf(error)
     if (status === 401 || status === 403) {
@@ -584,14 +612,16 @@ export class Drive9FileSystem extends FileSystem {
     processPath: string,
     expected: Uint8Array,
     policy: 'profile' | 'required' = 'profile',
+    signal?: AbortSignal,
   ): Promise<void> {
     if (this.config.mountConsistency === 'eventual' && policy === 'profile') return
     const deadline = Date.now() + this.config.coherenceTimeoutMs
     while (true) {
+      throwIfAborted(signal, 'mount visibility verification')
       try {
-        const info = await this.waitForMountOperation(() => this.mountStat(processPath), deadline, processPath)
+        const info = await this.waitForMountOperation(() => this.mountStat(processPath), deadline, processPath, signal)
         if (info.isFile()) {
-          const actual = await this.waitForMountOperation(() => this.mountReadFile(processPath), deadline, processPath)
+          const actual = await this.waitForMountOperation(() => this.mountReadFile(processPath), deadline, processPath, signal)
           if (actual.equals(Buffer.from(expected))) return
         }
       } catch (error: unknown) {
@@ -599,7 +629,26 @@ export class Drive9FileSystem extends FileSystem {
         if (code !== 'ENOENT' && code !== 'ENOTDIR') throw this.mapFsError(error, 'verify', processPath)
       }
       if (Date.now() >= deadline) throw this.mountCoherenceTimeout(processPath)
-      await new Promise(resolveSleep => setTimeout(resolveSleep, this.config.coherencePollMs))
+      await this.waitForPoll(signal)
+    }
+  }
+
+  private async confirmCommittedMount(
+    processPath: string,
+    expected: Uint8Array,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.config.mountConsistency === 'eventual') return
+    try {
+      await this.waitForMountBytes(processPath, expected, 'required', signal)
+    } catch (error: unknown) {
+      const reason = error instanceof FsError && error.code === 'FS_ABORTED'
+        ? 'aborted'
+        : error instanceof MountCoherenceTimeoutError
+          ? 'timeout'
+          : 'io'
+      throw new Drive9WorkspaceCommittedMountUnconfirmedError(String(revisionToken(revision)), reason, { cause: error })
     }
   }
 
@@ -611,26 +660,73 @@ export class Drive9FileSystem extends FileSystem {
     return readFile(processPath)
   }
 
-  private async waitForMountOperation<T>(operation: () => Promise<T>, deadline: number, processPath: string): Promise<T> {
+  private async waitForMountOperation<T>(
+    operation: () => Promise<T>,
+    deadline: number,
+    processPath: string,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const remaining = deadline - Date.now()
     if (remaining <= 0) throw this.mountCoherenceTimeout(processPath)
     return await new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => reject(this.mountCoherenceTimeout(processPath)), remaining)
+      let settled = false
+      const settle = (complete: () => void) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        complete()
+      }
+      const timer = setTimeout(() => settle(() => reject(this.mountCoherenceTimeout(processPath))), remaining)
+      const abort = () => settle(() => reject(new FsError('mount visibility verification aborted', 'FS_ABORTED')))
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) {
+        abort()
+        return
+      }
       operation().then(
-        value => {
-          clearTimeout(timer)
-          resolve(value)
-        },
-        error => {
-          clearTimeout(timer)
-          reject(error)
-        },
+        value => settle(() => resolve(value)),
+        error => settle(() => reject(error)),
       )
     })
   }
 
-  private mountCoherenceTimeout(processPath: string): FsError {
-    return new FsError(`Drive9 mount did not expose committed bytes for "${processPath}"`, 'FS_IO_ERROR')
+  private mountCoherenceTimeout(processPath: string): MountCoherenceTimeoutError {
+    return new MountCoherenceTimeoutError(processPath)
+  }
+
+  private async waitForPoll(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal, 'mount visibility verification')
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const settle = (complete: () => void) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        complete()
+      }
+      const timer = setTimeout(() => settle(resolve), this.config.coherencePollMs)
+      const abort = () => settle(() => reject(new FsError('mount visibility verification aborted', 'FS_ABORTED')))
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
+    })
+  }
+
+  private async checkedTarget(
+    target: FsTarget,
+    sandboxPolicy: SandboxExecutionPolicy | undefined,
+    signal?: AbortSignal,
+  ): Promise<FsTarget> {
+    const policy = sandboxPolicy ?? this.ctx.sandboxPolicy.resolve()
+    if (policy.mode === 'danger-full-access') return target
+    if (policy.mode === 'read-only') {
+      throw new FsError(`cannot write "${target.displayPath}": file access denied under read-only mode`, 'FS_SANDBOX_DENIED')
+    }
+    const fresh = await this.resolve(target.displayPath, signal === undefined ? undefined : { signal })
+    const processPath = this.targets.decode(fresh).processPath
+    if (writableRoots(policy).some(root => pathContained(root, processPath))) return fresh
+    throw new FsError(`cannot write "${target.displayPath}": file access denied under workspace-write mode`, 'FS_SANDBOX_DENIED')
   }
 
   private async waitForSdkBytes(remotePath: string, expected: Uint8Array, newerThan: number): Promise<number> {
