@@ -31,14 +31,14 @@ V1 does not provide LayerFS checkpoints, workspace rollback, or exactly-once ext
 
 ## Package Shape
 
-One npm package, `@drive9-ai/drive9-dsh`, exposes independent Cordis components:
+One npm package, `@drive9/drive9-dsh`, exposes independent Cordis components:
 
-- `@drive9-ai/drive9-dsh/filesystem` — `Drive9FileSystem`, registered as `ctx.fs`.
-- `@drive9-ai/drive9-dsh/evidence` — `Drive9EvidenceStore`, registered as `ctx.spillStore`.
-- `@drive9-ai/drive9-dsh/result-tools` — bounded `result_read` and `result_search` tools.
-- `@drive9-ai/drive9-dsh/runtime-context` — model-visible eventual-consistency warning.
-- `@drive9-ai/drive9-dsh` — a programmatic preset that installs all four components.
-- `@drive9-ai/drive9-dsh/cordis.patch.yml` — a DSH bundle patch for one-command installation.
+- `@drive9/drive9-dsh/filesystem` — `Drive9FileSystem`, registered as `ctx.fs`.
+- `@drive9/drive9-dsh/evidence` — `Drive9EvidenceStore`, registered as `ctx.spillStore`.
+- `@drive9/drive9-dsh/result-tools` — bounded `result_read` and `result_search` tools.
+- `@drive9/drive9-dsh/runtime-context` — model-visible eventual-consistency warning.
+- `@drive9/drive9-dsh` — a programmatic preset that installs all four components.
+- `@drive9/drive9-dsh/cordis.patch.yml` — a DSH bundle patch for one-command installation.
 
 The single package keeps installation simple without merging unrelated responsibilities. Every component remains independently importable and testable.
 

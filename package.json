@@ -1,5 +1,5 @@
 {
-  "name": "@drive9-ai/drive9-dsh",
+  "name": "@drive9/drive9-dsh",
   "version": "0.1.0",
   "description": "Drive9 workspace and durable evidence components for DeepSeek Harness",
   "type": "module",
@@ -33,9 +33,11 @@
     "dist",
     "cordis.patch.yml",
     "README.md",
+    "LICENSE",
     "CONTRIBUTING.md",
     "SECURITY.md",
-    "docs"
+    "docs",
+    "scripts/release-public.sh"
   ],
   "scripts": {
     "clean": "rm -rf dist coverage",
@@ -45,6 +47,8 @@
     "test:race": "vitest run --pool=forks --maxWorkers=4",
     "test:real": "vitest run --config vitest.real.config.ts",
     "lint:package": "publint",
+    "release:check": "bash scripts/release-public.sh --check",
+    "release:publish": "bash scripts/release-public.sh --publish",
     "prepack": "npm run clean && npm run build"
   },
   "engines": {
@@ -53,9 +57,14 @@
   "publishConfig": {
     "access": "public"
   },
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/drive9-ai/drive9-dsh.git"
+  },
+  "homepage": "https://github.com/drive9-ai/drive9-dsh#readme",
+  "bugs": {
+    "url": "https://github.com/drive9-ai/drive9-dsh/issues"
   },
   "dsh": {
     "bundle": {

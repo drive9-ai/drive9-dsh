@@ -3,7 +3,7 @@
 Persistent agent workspaces and durable, bounded tool evidence for
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-`@drive9-ai/drive9-dsh` is a standard DSH bundle with four independent Cordis components:
+`@drive9/drive9-dsh` is a standard DSH bundle with four independent Cordis components:
 
 - a Drive9 revision-CAS filesystem for Harness `read`, `write`, and `edit` tools;
 - an isolated evidence backend for oversized tool results;
@@ -56,24 +56,97 @@ The workspace remains process-visible, while evidence stays outside the workspac
 mount. A shell command, workspace deletion, or workspace rollback cannot address the
 evidence namespace.
 
+## Prerequisites
+
+- Linux with Node.js 22.19 or newer, npm, and pnpm on `PATH`;
+- DeepSeek Harness `0.1.0-rc.6`, including the standard `dsh` CLI;
+- a current Drive9 CLI with `drive9 token issue` support and access to a Drive9
+  server;
+- `/dev/fuse` and `fusermount3` for the recommended `strong` profile, or a WebDAV
+  mount for the opt-in `eventual` profile;
+- separate, path-scoped workspace and evidence credentials. An owner credential is
+  needed only to create roots and issue those scoped credentials.
+
+Install the Harness CLI and pnpm before continuing:
+
+```bash
+npm install --global @deepseek-ai/dsh@0.1.0-rc.6 pnpm
+```
+
+Install the Drive9 CLI from the
+[public Drive9 repository](https://github.com/mem9-ai/drive9) and verify both CLIs:
+
+```bash
+dsh --version
+drive9 version
+```
+
 ## Quick start
 
-### 1. Mount the workspace
+Supply the owner credential through your normal secret injector, then configure the
+non-secret paths once. The assertion fails before provisioning if the secret is
+absent:
 
-Configure Drive9, create the remote root once, and mount it into the Harness runtime.
-The default strong profile requires Linux with `/dev/fuse` and `fusermount3`:
+```bash
+: "${DRIVE9_OWNER_API_KEY:?inject the Drive9 owner credential}"
+
+export DRIVE9_BASE_URL="https://api.drive9.ai"
+export DRIVE9_EVIDENCE_BASE_URL="$DRIVE9_BASE_URL"
+export DRIVE9_MOUNT_ROOT="/mnt/drive9"
+export DRIVE9_REMOTE_ROOT="/workspace"
+export DRIVE9_EVIDENCE_ROOT="/evidence/dsh"
+export DRIVE9_MOUNT_CONSISTENCY="strong"
+```
+
+### 1. Provision isolated roots and credentials
+
+Create both roots once. Keep the evidence root unmounted so workspace tools and shell
+commands cannot address it:
 
 ```bash
 drive9 ctx add \
   --name dsh-owner \
-  --server https://api.drive9.ai \
+  --server "$DRIVE9_BASE_URL" \
   --api-key "$DRIVE9_OWNER_API_KEY"
+drive9 ctx use dsh-owner
 
 drive9 fs mkdir :/workspace
-mkdir -p /mnt/drive9
+drive9 fs mkdir :/evidence/dsh
+
+drive9 token issue dsh-workspace \
+  --ttl 24h \
+  --allow /workspace:read,list,write,delete \
+  --print
+
+drive9 token issue dsh-evidence \
+  --ttl 24h \
+  --allow /evidence/dsh:read,write \
+  --print
+```
+
+Each command prints only the bearer token and saves its local name for later rotation
+or revocation. Store the printed value in your secret manager without leaving it on
+disk, then inject the values as distinct credentials. The package rejects a shared
+credential:
+
+```bash
+: "${DRIVE9_WORKSPACE_API_KEY:?inject the workspace-scoped credential}"
+: "${DRIVE9_EVIDENCE_API_KEY:?inject the separate evidence-scoped credential}"
+```
+
+See [credential and deployment guidance](docs/operations.md) for production token
+scope, TTL, and rotation guidance.
+
+### 2. Mount the workspace
+
+Mount the workspace into the Harness runtime. The default strong profile requires
+Linux with `/dev/fuse` and `fusermount3`:
+
+```bash
+mkdir -p "$DRIVE9_MOUNT_ROOT"
 
 DRIVE9_API_KEY="$DRIVE9_WORKSPACE_API_KEY" \
-  drive9 mount --mode=fuse --profile=none :/workspace /mnt/drive9
+  drive9 mount --mode=fuse --profile=none :/workspace "$DRIVE9_MOUNT_ROOT"
 ```
 
 The mount must exist in the **same execution world** as Harness subprocesses. If
@@ -90,7 +163,7 @@ To opt into relaxed WebDAV semantics instead, mount with WebDAV and explicitly s
 
 ```bash
 DRIVE9_API_KEY="$DRIVE9_WORKSPACE_API_KEY" \
-  drive9 mount --mode=webdav --profile=none :/workspace /mnt/drive9
+  drive9 mount --mode=webdav --profile=none :/workspace "$DRIVE9_MOUNT_ROOT"
 
 export DRIVE9_MOUNT_CONSISTENCY="eventual"
 ```
@@ -99,29 +172,33 @@ This profile returns from writes after the SDK CAS commits; it does not wait for
 mounted path to converge. Do not use it for workflows that write through Harness and
 immediately validate with `cat`, `rg`, tests, a language server, or another subprocess.
 
-### 2. Prepare isolated evidence storage
-
-Create an unmounted evidence root and use a different, narrowly scoped credential for
-it. Do not mount this root into the agent workspace.
-
-```bash
-drive9 fs mkdir :/evidence/dsh
-
-export DRIVE9_WORKSPACE_API_KEY="...workspace-scoped token..."
-export DRIVE9_EVIDENCE_API_KEY="...evidence-scoped token..."
-```
-
-See [credential and deployment guidance](docs/operations.md) for recommended Drive9
-token scopes.
-
 ### 3. Install the bundle
 
+The recommended release channel is the prebuilt npm package:
+
 ```bash
-dsh plugin --profile web add @drive9-ai/drive9-dsh
+dsh plugin --profile web add @drive9/drive9-dsh
 ```
 
-The package declares a DSH bundle, so the standard `dsh plugin` command installs it and adds its
-`cordis.patch.yml` layer to the selected profile. The bundle disables the stock
+To validate an unreleased checkout or install before registry publication, build the
+same prebuilt tarball from the public repository instead of installing the TypeScript
+sources directly from Git:
+
+```bash
+git clone https://github.com/drive9-ai/drive9-dsh.git
+cd drive9-dsh
+npm ci
+PACKAGE_TARBALL="$(npm pack --silent)"
+dsh plugin --profile web add "$PWD/$PACKAGE_TARBALL"
+cd ..
+```
+
+This source-build route runs the package's normal `prepack` build and gives DSH a
+tarball containing `dist/`. A direct `github:drive9-ai/drive9-dsh` dependency does not
+contain built output and is not a supported install path.
+
+The package declares a DSH bundle, so the standard `dsh plugin` command installs it
+and adds its `cordis.patch.yml` layer to the selected profile. The bundle disables the stock
 `fs-sandbox` and `spill-local` storage providers, then installs the Drive9 filesystem,
 evidence backend, and result tools. Harness's stock filesystem tools, subprocess
 runtime, sandbox policy, observation policy, and spill policy remain in place. The
@@ -131,20 +208,21 @@ Drive9 filesystem implements the same per-call `read-only`, `workspace-write`, a
 ### 4. Configure and run
 
 ```bash
-export DRIVE9_BASE_URL="https://api.drive9.ai"
-export DRIVE9_MOUNT_ROOT="/mnt/drive9"
-export DRIVE9_REMOTE_ROOT="/workspace"
-export DRIVE9_EVIDENCE_ROOT="/evidence/dsh"
-
 cd "$DRIVE9_MOUNT_ROOT"
 dsh web --dump-config
 dsh web
 ```
 
 `dsh web --dump-config` is the recommended preflight. Its composed tree must contain
-exactly one active `fs` provider: `@drive9-ai/drive9-dsh/filesystem`. Custom profiles
+exactly one active `fs` provider: `@drive9/drive9-dsh/filesystem`. Custom profiles
 use the equivalent `dsh --profile <name> --dump-config` and `dsh --profile <name>`
 commands; no Drive9-specific launcher is required.
+
+To remove the bundle and its profile layer:
+
+```bash
+dsh plugin --profile web remove @drive9/drive9-dsh
+```
 
 In the default strong profile, startup fails instead of falling back or weakening the
 contract when:
@@ -161,7 +239,7 @@ snapshot, and skips the bidirectional proof by default. Explicitly setting
 
 ## Components
 
-### `@drive9-ai/drive9-dsh/filesystem`
+### `@drive9/drive9-dsh/filesystem`
 
 `Drive9FileSystem` implements the complete Harness `FileSystem` contract.
 
@@ -187,7 +265,7 @@ blindly retrying. In `eventual`, it returns after the SDK CAS succeeds; `process
 `fileUrl()` remain available, but their mounted view has no read-your-writes guarantee.
 Both methods reject targets not authenticated by that filesystem instance.
 
-### `@drive9-ai/drive9-dsh/evidence`
+### `@drive9/drive9-dsh/evidence`
 
 `Drive9EvidenceStore` implements Harness `SpillStore`:
 
@@ -200,7 +278,7 @@ Reads verify stable revisions, exact byte count, manifest shape, SHA-256, and st
 UTF-8. A failed manifest write returns no locator. The unreachable content orphan can
 be reclaimed by operator retention without exposing partial evidence to the model.
 
-### `@drive9-ai/drive9-dsh/result-tools`
+### `@drive9/drive9-dsh/result-tools`
 
 The bundle registers:
 
@@ -242,7 +320,7 @@ the standard `sandboxPolicy`, `systemPrompt`, and `tools` services:
 
 ```ts
 import { Context } from '@deepseek-ai/cordis'
-import * as Drive9Dsh from '@drive9-ai/drive9-dsh'
+import * as Drive9Dsh from '@drive9/drive9-dsh'
 
 const ctx = new Context()
 

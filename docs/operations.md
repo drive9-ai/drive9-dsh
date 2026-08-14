@@ -28,13 +28,13 @@ For a container deployment, prefer this order:
 Use the standard DSH bundle flow; no Drive9-specific launcher is required:
 
 ```bash
-dsh plugin --profile web add @drive9-ai/drive9-dsh
+dsh plugin --profile web add @drive9/drive9-dsh
 dsh web --dump-config
 dsh web
 ```
 
 Before startup, inspect the dump and require exactly one active `fs` provider,
-`@drive9-ai/drive9-dsh/filesystem`. The stock sandbox-policy service remains active;
+`@drive9/drive9-dsh/filesystem`. The stock sandbox-policy service remains active;
 the Drive9 provider itself enforces its per-call mutation policy.
 
 Do not point a strong profile at an ordinary local directory, WebDAV mount, or
