@@ -22,6 +22,7 @@ export interface FakeDrive9Options {
   mountRoot?: string
   remoteRoot?: string
   mirrorWrites?: boolean
+  mirrorDeletes?: boolean
 }
 
 export class FakeDrive9Client implements Drive9Client {
@@ -34,11 +35,13 @@ export class FakeDrive9Client implements Drive9Client {
   private readonly mountRoot: string | undefined
   private readonly remoteRoot: string | undefined
   private readonly mirrorWrites: boolean
+  private readonly mirrorDeletes: boolean
 
   constructor(options: FakeDrive9Options = {}) {
     this.mountRoot = options.mountRoot
     this.remoteRoot = options.remoteRoot
     this.mirrorWrites = options.mirrorWrites ?? true
+    this.mirrorDeletes = options.mirrorDeletes ?? true
     this.mkdirRecord('/')
     if (options.remoteRoot !== undefined) this.mkdirRecord(options.remoteRoot)
   }
@@ -147,7 +150,7 @@ export class FakeDrive9Client implements Drive9Client {
     const normalized = posix.normalize(path)
     if (!this.nodes.delete(normalized)) throw new FakeStatusError('not found', 404)
     const local = this.localPath(normalized)
-    if (local !== undefined) await rm(local, { force: true, recursive: true })
+    if (local !== undefined && this.mirrorDeletes) await rm(local, { force: true, recursive: true })
   }
 
   setFile(path: string, data: Uint8Array | string, mode?: number): number {

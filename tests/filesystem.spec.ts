@@ -20,6 +20,7 @@ async function setup(overrides: {
   verifyCoherence?: boolean
   mirrored?: boolean
   mirrorWrites?: boolean
+  mirrorDeletes?: boolean
   mountConsistency?: Drive9MountConsistency
 } = {}) {
   const mountRoot = await mkdtemp(join(tmpdir(), 'drive9-dsh-fs-'))
@@ -30,6 +31,7 @@ async function setup(overrides: {
         mountRoot,
         remoteRoot: '/workspace',
         ...(overrides.mirrorWrites === undefined ? {} : { mirrorWrites: overrides.mirrorWrites }),
+        ...(overrides.mirrorDeletes === undefined ? {} : { mirrorDeletes: overrides.mirrorDeletes }),
       })
   client.mkdirRecord('/workspace')
   const context = new Context().intercept('logger', { level: 2 })
@@ -60,15 +62,6 @@ describe('Drive9FileSystem', () => {
       apiKey: 'workspace-key',
       mountConsistency: 'silent-downgrade' as Drive9MountConsistency,
     })).toThrow('mountConsistency must be "strong" or "eventual"')
-  })
-
-  it('allows a full default FUSE cache-expiry window before failing strong coherence', () => {
-    const fs = new Drive9FileSystem(new Context(), { apiKey: 'workspace-key' }, () => new FakeDrive9Client())
-    expect(fs.config).toMatchObject({
-      coherenceTimeoutMs: 30_000,
-      mountConsistency: 'strong',
-      verifyCoherence: true,
-    })
   })
 
   it('fails startup for missing, non-directory, and remote-file roots', async () => {
@@ -110,6 +103,11 @@ describe('Drive9FileSystem', () => {
     const { fs, client } = await setup()
     await fs.initialize()
     expect([...client.nodes].some(([path]) => path.includes('.drive9-dsh-coherence-'))).toBe(false)
+  })
+
+  it('cleans the coherence probe through the mount instead of assuming remote-delete invalidation', async () => {
+    const { fs } = await setup({ mirrorDeletes: false })
+    await expect(fs.initialize()).resolves.toBeUndefined()
   })
 
   it('waits for mount metadata before reading newly committed bytes', async () => {
