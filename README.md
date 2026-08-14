@@ -9,15 +9,19 @@ Persistent agent workspaces and durable, bounded tool evidence for
 - an isolated evidence backend for oversized tool results;
 - model-visible `result_search` and `result_read` tools with hard output limits.
 
-Drive9 does **not** provide a shell or sandbox. V1 supports one strong execution-world
-profile: a Linux Drive9 FUSE mount inside the same container, VM, or host where Harness
-process tools run. The integration proves that the SDK and FUSE mount expose the same
-bytes before it starts.
+Drive9 does **not** provide a shell or sandbox. V1 exposes two explicit mount-consistency
+profiles:
 
-WebDAV mounts, including macOS WebDAVFS, are not supported for the combined
-SDK-revision-CAS and subprocess read-your-writes contract. In real validation the
-Drive9 WebDAV bridge observed an SDK write immediately while the macOS mounted
-`open`/`stat` view remained stale or blocked for more than 30 seconds.
+- `strong` (default and recommended) uses a Linux Drive9 FUSE mount in the same
+  execution world as Harness process tools. Startup proves SDK-to-mount and
+  mount-to-SDK coherence, and writes wait for exact mounted bytes before returning.
+- `eventual` is an opt-in WebDAV profile. Model-facing reads, writes, revision CAS, and
+  evidence still use the Drive9 SDK, but process tools may observe stale mounted bytes
+  for more than 30 seconds after an SDK write.
+
+The integration never silently downgrades `strong` to `eventual`. In real macOS
+WebDAVFS validation, the Drive9 bridge observed an SDK write immediately while the
+mounted `open`/`stat` view remained stale or blocked for more than 30 seconds.
 
 ## Why
 
@@ -42,7 +46,7 @@ evidence namespace.
 ### 1. Mount the workspace
 
 Configure Drive9, create the remote root once, and mount it into the Harness runtime.
-V1 requires Linux with `/dev/fuse` and `fusermount3` available:
+The default strong profile requires Linux with `/dev/fuse` and `fusermount3`:
 
 ```bash
 drive9 ctx add \
@@ -61,10 +65,24 @@ The mount must exist in the **same execution world** as Harness subprocesses. If
 Harness runs inside a container, mount Drive9 inside that container or bind the mount
 into it before Harness starts.
 
-`--profile=none` is part of the supported profile. A coding-agent mount profile can
+`--profile=none` is part of the strong profile. A coding-agent mount profile can
 route process paths through a local overlay while SDK calls still address Drive9,
-splitting the two sides of the revision-CAS contract. Do not substitute WebDAV or a
-local-overlay profile, and do not disable the startup proof to make one start.
+splitting the two sides of the revision-CAS contract. Do not use a local-overlay
+profile, and do not disable the startup proof to make one start.
+
+To opt into relaxed WebDAV semantics instead, mount with WebDAV and explicitly select
+`eventual`:
+
+```bash
+DRIVE9_API_KEY="$DRIVE9_WORKSPACE_API_KEY" \
+  drive9 mount --mode=webdav --profile=none :/workspace /mnt/drive9
+
+export DRIVE9_MOUNT_CONSISTENCY="eventual"
+```
+
+This profile returns from writes after the SDK CAS commits; it does not wait for the
+mounted path to converge. Do not use it for workflows that write through Harness and
+immediately validate with `cat`, `rg`, tests, a language server, or another subprocess.
 
 ### 2. Prepare isolated evidence storage
 
@@ -105,12 +123,17 @@ cd "$DRIVE9_MOUNT_ROOT"
 dsh --profile web
 ```
 
-Startup fails instead of falling back to host-local storage when:
+In the default strong profile, startup fails instead of falling back or weakening the
+contract when:
 
 - the mount is missing or not writable;
 - the remote root is missing or not a directory;
 - SDK writes do not appear through the mount;
 - mount writes do not produce a newer Drive9 revision through the SDK.
+
+The eventual profile still validates the local mount directory and remote Drive9 root,
+logs a prominent warning, and skips the bidirectional proof by default. Explicitly
+setting `verifyCoherence: true` still runs the proof and propagates any failure.
 
 ## Components
 
@@ -129,9 +152,10 @@ Startup fails instead of falling back to host-local storage when:
 | guarded write/edit | Exact Drive9 revision CAS |
 | unconditional write/edit | Bounded read/modify/CAS retry |
 
-After a successful SDK write, the call returns only after the mounted path exposes the
-same bytes. `processPath()` and `fileUrl()` reject targets not authenticated by that
-filesystem instance.
+In `strong`, a successful SDK write returns only after the mounted path exposes the
+same bytes. In `eventual`, it returns after the SDK CAS succeeds; `processPath()` and
+`fileUrl()` remain available, but their mounted view has no read-your-writes guarantee.
+Both methods reject targets not authenticated by that filesystem instance.
 
 ### `@drive9-ai/drive9-dsh/evidence`
 
@@ -178,6 +202,7 @@ The shipped bundle reads these environment variables:
 | `DRIVE9_WORKSPACE_API_KEY` | yes | — | Workspace-scoped SDK credential |
 | `DRIVE9_MOUNT_ROOT` | no | `/mnt/drive9` | Process-visible Drive9 mount |
 | `DRIVE9_REMOTE_ROOT` | no | `/` | Remote subtree represented by the mount |
+| `DRIVE9_MOUNT_CONSISTENCY` | no | `strong` | `strong` Linux FUSE or explicit `eventual` WebDAV semantics |
 | `DRIVE9_EVIDENCE_BASE_URL` | no | `DRIVE9_BASE_URL` | Drive9 API base for evidence |
 | `DRIVE9_EVIDENCE_API_KEY` | yes | — | Separate evidence-scoped credential |
 | `DRIVE9_EVIDENCE_ROOT` | no | `/evidence/dsh` | Unmounted evidence root |
@@ -196,6 +221,7 @@ await ctx.plugin(Drive9Dsh, {
     remoteRoot: '/workspace',
     baseUrl: process.env.DRIVE9_BASE_URL,
     apiKey: process.env.DRIVE9_WORKSPACE_API_KEY,
+    mountConsistency: 'strong',
   },
   evidence: {
     root: '/evidence/dsh',
@@ -249,8 +275,8 @@ V1 intentionally does not provide:
 
 - a shell, process sandbox, terminal, or language server;
 - automatic Drive9 mounting;
-- WebDAV or local-overlay support for the filesystem component's strong consistency
-  contract;
+- strong subprocess read-your-writes through WebDAV;
+- local-overlay support for either consistency profile;
 - LayerFS checkpoints or workspace rollback;
 - source-streaming or crash-recoverable tool capture;
 - exactly-once external tool side effects;
@@ -290,7 +316,8 @@ the release checklist. The real test rejects non-Linux and non-FUSE mount roots.
 - Node.js 22.19 or newer
 - DeepSeek Harness `0.1.0-rc.6`
 - Drive9 JavaScript SDK `0.1.4`
-- Linux Drive9 FUSE mount in the Harness execution world
+- Linux Drive9 FUSE for the default strong profile
+- WebDAV for the explicit eventual profile
 
 DeepSeek Harness is a developer preview. Upstream service-contract changes require a
 new package release and contract review.

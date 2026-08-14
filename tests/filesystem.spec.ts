@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Drive9FileSystem } from '../src/filesystem.js'
+import type { Drive9MountConsistency } from '../src/filesystem.js'
 import { FakeDrive9Client, FakeStatusError } from './fake-drive9.js'
 
 const roots: string[] = []
@@ -15,7 +16,12 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true })))
 })
 
-async function setup(overrides: { verifyCoherence?: boolean; mirrored?: boolean; mirrorWrites?: boolean } = {}) {
+async function setup(overrides: {
+  verifyCoherence?: boolean
+  mirrored?: boolean
+  mirrorWrites?: boolean
+  mountConsistency?: Drive9MountConsistency
+} = {}) {
   const mountRoot = await mkdtemp(join(tmpdir(), 'drive9-dsh-fs-'))
   roots.push(mountRoot)
   const client = new FakeDrive9Client(overrides.mirrored === false
@@ -26,15 +32,17 @@ async function setup(overrides: { verifyCoherence?: boolean; mirrored?: boolean;
         ...(overrides.mirrorWrites === undefined ? {} : { mirrorWrites: overrides.mirrorWrites }),
       })
   client.mkdirRecord('/workspace')
-  const fs = new Drive9FileSystem(new Context(), {
+  const context = new Context().intercept('logger', { level: 2 })
+  const fs = new Drive9FileSystem(context, {
     mountRoot,
     remoteRoot: '/workspace',
     apiKey: 'workspace-key',
-    verifyCoherence: overrides.verifyCoherence ?? true,
+    ...(overrides.mountConsistency === undefined ? {} : { mountConsistency: overrides.mountConsistency }),
+    ...(overrides.verifyCoherence === undefined ? {} : { verifyCoherence: overrides.verifyCoherence }),
     coherenceTimeoutMs: 100,
     coherencePollMs: 2,
   }, () => client)
-  return { fs, client, mountRoot }
+  return { fs, client, context, mountRoot }
 }
 
 async function expectFsCode(promise: Promise<unknown>, code: string): Promise<void> {
@@ -45,6 +53,13 @@ describe('Drive9FileSystem', () => {
   it('requires an explicit workspace credential', () => {
     expect(() => new Drive9FileSystem(new Context(), { apiKey: '', verifyCoherence: false }))
       .toThrow('filesystem apiKey is required')
+  })
+
+  it('rejects an unknown mount consistency profile', () => {
+    expect(() => new Drive9FileSystem(new Context(), {
+      apiKey: 'workspace-key',
+      mountConsistency: 'silent-downgrade' as Drive9MountConsistency,
+    })).toThrow('mountConsistency must be "strong" or "eventual"')
   })
 
   it('fails startup for missing, non-directory, and remote-file roots', async () => {
@@ -165,6 +180,26 @@ describe('Drive9FileSystem', () => {
       message: expect.stringMatching(/coherence proof failed/),
       cause: { code: 'FS_IO_ERROR' },
     })
+  })
+
+  it('makes eventual mount consistency explicit and does not wait for process visibility', async () => {
+    const { fs, client, context } = await setup({ mirrorWrites: false, mountConsistency: 'eventual' })
+    await fs.initialize()
+    expect(fs.config).toMatchObject({ mountConsistency: 'eventual', verifyCoherence: false })
+    expect(context.logger.buffer).toContainEqual(expect.objectContaining({
+      type: 'warn',
+      args: [expect.stringMatching(/may remain stale for more than 30 seconds/)],
+    }))
+
+    const target = await fs.resolve('eventual.txt')
+    await fs.writeText(target, 'committed through the SDK', { kind: 'createIfAbsent' })
+    expect(Buffer.from(client.getFile('/workspace/eventual.txt') ?? []).toString('utf8')).toBe('committed through the SDK')
+    await expect(readFile(fs.processPath(target), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('honors an explicit coherence proof in eventual mode instead of silently downgrading it', async () => {
+    const { fs } = await setup({ mirrored: false, mountConsistency: 'eventual', verifyCoherence: true })
+    await expect(fs.initialize()).rejects.toThrow(/coherence proof failed/)
   })
 
   it('implements create and replace CAS with stable Drive9 revisions', async () => {

@@ -1,9 +1,11 @@
 # Deployment and operations
 
-## Execution-world requirement
+## Execution profiles
 
-V1 requires Linux with `/dev/fuse` and `fusermount3`. Mount Drive9 before DeepSeek
-Harness starts with the strong-consistency profile:
+### Strong Linux FUSE
+
+The default and recommended profile requires Linux with `/dev/fuse` and
+`fusermount3`. Mount Drive9 before DeepSeek Harness starts:
 
 ```bash
 mkdir -p /mnt/drive9
@@ -23,11 +25,27 @@ For a container deployment, prefer this order:
 4. start the selected DSH profile;
 5. let `Drive9FileSystem` complete its bidirectional coherence probe.
 
-Do not point `DRIVE9_MOUNT_ROOT` at an ordinary local directory, WebDAV mount, or
+Do not point a strong profile at an ordinary local directory, WebDAV mount, or
 local-overlay profile. Startup deliberately tests SDK-to-mount and mount-to-SDK
-visibility and rejects split worlds. macOS WebDAVFS is explicitly unsupported: real
-validation observed the Drive9 bridge receive an SDK write immediately while mounted
-`open`/`stat` remained stale or blocked for more than 30 seconds.
+visibility and fails rather than downgrading a split world.
+
+### Eventual WebDAV
+
+To accept relaxed subprocess visibility, mount with WebDAV and opt in explicitly:
+
+```bash
+mkdir -p /mnt/drive9
+DRIVE9_API_KEY="$DRIVE9_WORKSPACE_API_KEY" \
+  drive9 mount --mode=webdav --profile=none :/workspace /mnt/drive9
+
+export DRIVE9_MOUNT_CONSISTENCY="eventual"
+```
+
+SDK-backed model reads, writes, revision CAS, and evidence remain authoritative. The
+filesystem call returns when the SDK CAS commits and does not wait for WebDAV to
+converge. The process-visible path may remain stale for more than 30 seconds. Do not
+use this profile when an agent writes and immediately validates through `cat`, `rg`,
+tests, a language server, or another subprocess. Startup logs this limitation.
 
 ## Credential separation
 
@@ -80,17 +98,20 @@ have deliberately different deletion semantics.
 Treat failure to load the filesystem component as a deployment failure. Common causes:
 
 - mount absent or not writable;
-- non-Linux, non-FUSE, WebDAV, or local-overlay mount profile;
+- an unsupported local-overlay or split mount profile;
 - remote root absent;
 - workspace credential missing required access;
 - mount and SDK credentials refer to different tenants or roots;
 - stale or disconnected mount;
 - evidence root missing or evidence credential denied.
 
-The coherence probe uses a unique hidden filename, deletes it on success, and attempts
-best-effort cleanup after failure. Do not disable `verifyCoherence` in production.
-Disabling the probe does not make WebDAV, a local overlay, or a split SDK/process world
-supported.
+In `strong`, the coherence probe uses a unique hidden filename, deletes it on success,
+and attempts best-effort cleanup after failure. Do not disable `verifyCoherence` in a
+strong production deployment.
+
+In `eventual`, the proof defaults off and the package emits a warning. Explicitly
+setting `verifyCoherence: true` still runs it and does not suppress a failure. There is
+no automatic profile switch in either direction.
 
 ## Real-service test
 
@@ -125,5 +146,7 @@ The evidence artifact remains for retention testing. Use a disposable evidence r
 operator cleanup policy for repeated runs.
 
 For every release candidate, record the exact package commit, exact Drive9 CLI commit,
-non-skipped real-test pass count, and SDK-to-mount plus mount-close-to-SDK timings. Do
-not publish from fake-only or WebDAV validation.
+non-skipped real-test pass count, and SDK-to-mount plus mount-close-to-SDK timings. This
+Linux FUSE test remains the release gate for the strong profile. WebDAV eventual
+behavior is separately covered by a discriminator that proves SDK success does not
+wait for mounted visibility and that the relaxed warning is present.

@@ -12,9 +12,12 @@ Source baselines:
 
 Drive9 supplies a persistent workspace and durable evidence. It does not supply a shell, process sandbox, language server, or compute runtime.
 
-The workspace is mounted before DeepSeek Harness starts. The V1 strong-consistency profile is a Linux Drive9 FUSE mount created with `drive9 mount --mode=fuse --profile=none`. The mount and every process-backed Harness capability run in the same host, container, or VM. A deployment that cannot meet these conditions must not load the workspace plugin.
+The workspace is mounted before DeepSeek Harness starts. V1 has two explicit consistency profiles:
 
-WebDAV mounts are not a supported substitute. Real macOS WebDAVFS validation showed that the Drive9 bridge observed an SDK write immediately while the OS-mounted `open`/`stat` view remained stale or blocked for more than 30 seconds. Coding-agent local-overlay profiles are also unsupported because process paths may no longer address the same Drive9 objects as SDK operations. V1 does not silently downgrade either profile into weaker semantics.
+- `strong` is the default and recommended profile. It uses a Linux Drive9 FUSE mount created with `drive9 mount --mode=fuse --profile=none`; the mount and every process-backed Harness capability run in the same host, container, or VM.
+- `eventual` is an opt-in WebDAV profile. SDK-backed model operations and evidence retain their normal consistency, while process-backed reads through the mounted path are best-effort and may remain stale for more than 30 seconds after an SDK write.
+
+Real macOS WebDAVFS validation showed that the Drive9 bridge observed an SDK write immediately while the mounted `open`/`stat` view remained stale or blocked for more than 30 seconds. The package never silently downgrades `strong` into `eventual`; the relaxed profile must be selected in configuration and emits a runtime warning. Coding-agent local-overlay profiles remain unsupported because process paths may address different objects from SDK operations.
 
 Evidence uses a separate Drive9 credential and an unmounted root. Workspace tools, `processPath()`, `fileUrl()`, shell commands, and workspace deletion cannot address evidence objects.
 
@@ -42,7 +45,7 @@ The single package keeps installation simple without merging unrelated responsib
 - an absolute POSIX `remoteRoot` describing the same Drive9 subtree;
 - a Drive9 SDK client with access to that subtree.
 
-`mountRoot` must be backed by Linux FUSE and must not be a WebDAV mount, ordinary local directory, or coding-agent local overlay.
+`mountRoot` must be backed by Linux FUSE for `strong` or by WebDAV for explicit `eventual`. It must not be an ordinary local directory or coding-agent local overlay. The public `mountConsistency` option is the capability marker; its default is `strong`.
 
 `resolve()` canonicalizes through the mounted filesystem, follows existing symlinks, preserves a missing suffix below the nearest existing ancestor, and rejects lexical, symlink, prefix, NUL, and platform-separator escapes. Targets use an opaque provider-owned key. Consumers cannot manufacture or parse it.
 
@@ -66,11 +69,11 @@ Model-facing storage operations use the Drive9 SDK. The mount is used only for c
 
 An SDK revision check followed by a mount write is forbidden: it is a check-then-write race and is not a valid implementation of `replaceIfVersion`.
 
-After an SDK write succeeds, the provider waits for the mounted path to expose the exact bytes before returning. It fails with `FS_IO_ERROR` rather than claiming a coherent execution world when the mount remains stale.
+In `strong`, after an SDK write succeeds the provider waits for the mounted path to expose the exact bytes before returning. It fails with `FS_IO_ERROR` rather than claiming a coherent execution world when the mount remains stale. In `eventual`, the provider returns after the SDK CAS succeeds and makes no mounted read-your-writes promise; subprocess validation is therefore unsuitable immediately after a model write.
 
 ### Startup proof
 
-The filesystem service does not become injectable until it has:
+In `strong`, the filesystem service does not become injectable until it has:
 
 1. verified that `mountRoot` is a writable directory;
 2. verified that `remoteRoot` is a Drive9 directory;
@@ -78,9 +81,11 @@ The filesystem service does not become injectable until it has:
 4. replaced the probe through the mount and observed a newer revision and identical bytes through the SDK;
 5. removed the probe and confirmed cleanup.
 
-Failure aborts plugin startup. There is no automatic fallback to a host-local directory and no automatic downgrade to metadata-based local stale detection.
+Failure aborts plugin startup. There is no automatic fallback to a host-local directory and no automatic downgrade to `eventual` or metadata-based local stale detection.
 
-The behavioral proof remains mandatory in the supported profile. Disabling it does not make WebDAV, a local overlay, or a split SDK/process world supported.
+In `eventual`, `verifyCoherence` defaults to `false`: startup validates the mount directory and remote root, logs the relaxed-consistency warning, and skips the bidirectional proof. If an operator explicitly sets `verifyCoherence: true`, the proof runs and any failure remains fatal. The implementation never suppresses that explicit request.
+
+The behavioral proof remains mandatory for the default strong profile. Disabling it does not make a local overlay or split SDK/process world supported.
 
 The explicit fallback is to use DeepSeek Harness's own `fs-local`/`fs-sandbox` provider against a Drive9 mount. That separate profile is not implemented or advertised as strong Drive9 revision-CAS by this package.
 
@@ -161,9 +166,10 @@ The release must include discriminating tests for:
 7. same-session unissued locator denial, plain-text tool echo denial, unseeded parent denial, sibling denial, and seeded direct-parent locator success.
 8. evidence locator rejection by filesystem resolution/path methods.
 9. a real DeepSeek Harness agent loop in which the model uses the filesystem tool, a process-backed tool observes the same mounted bytes, an oversized result spills, and later model calls retrieve it with `result_search`/`result_read`.
+10. explicit profile discrimination: `strong` retains startup proof and post-write mount waiting; `eventual` warns, skips both by default, commits through SDK CAS, and never weakens an explicitly requested proof.
 
 Hosted CI must run type checking, unit tests, the fake-Drive9 integration suite, package build, and `npm pack --dry-run`. A separately documented opt-in release test exercises a real Drive9 service and Linux FUSE mount, rejects other filesystem types, and proves both SDK-to-process and process-close-to-newer-SDK-revision propagation.
 
 ## Compatibility
 
-V1 targets the DeepSeek Harness `0.1.0-rc.6` contracts, Node.js 22.19 or newer, and a Linux Drive9 FUSE mount in the Harness execution world. DeepSeek Harness is a developer preview; incompatible upstream service changes require a new package release and a fresh contract review.
+V1 targets the DeepSeek Harness `0.1.0-rc.6` contracts and Node.js 22.19 or newer. The strong profile requires Linux Drive9 FUSE in the Harness execution world; the explicit eventual profile supports WebDAV without subprocess read-your-writes. DeepSeek Harness is a developer preview; incompatible upstream service changes require a new package release and a fresh contract review.

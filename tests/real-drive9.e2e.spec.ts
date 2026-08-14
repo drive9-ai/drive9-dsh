@@ -39,6 +39,7 @@ describe.skipIf(!requested)('real Drive9 deployment', () => {
       apiKey: process.env.DRIVE9_WORKSPACE_API_KEY!,
       mountRoot: process.env.DRIVE9_MOUNT_ROOT!,
       remoteRoot: process.env.DRIVE9_REMOTE_ROOT!,
+      mountConsistency: 'strong',
       verifyCoherence: true,
     })
     const evidence = new Drive9EvidenceStore(new Context(), {

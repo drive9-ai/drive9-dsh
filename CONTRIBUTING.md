@@ -39,10 +39,12 @@ commits, the non-skipped real-test pass count, and the reported propagation timi
 - Keep filesystem, evidence storage, and result tools independently importable.
 - Do not add a local-storage fallback when Drive9 startup validation fails.
 - Preserve Drive9 revision CAS for guarded mutations.
-- Preserve the mandatory startup probe and post-write mounted-byte wait for every
-  write/edit path.
-- Do not silently downgrade the strong filesystem contract to WebDAV or a local-overlay
-  profile.
+- Preserve the mandatory startup proof and post-write mounted-byte wait for every
+  strong-profile write/edit path.
+- Keep WebDAV relaxation explicit as `mountConsistency: 'eventual'`, preserve its
+  runtime warning, and never silently downgrade `strong` or suppress an explicitly
+  requested proof.
+- Preserve SDK revision CAS in both consistency profiles.
 - Do not expose evidence paths, namespace listing, or possession-only authorization.
 - Keep model-facing reads and searches bounded by package hard limits.
 - Do not broaden V1 into a shell, sandbox, or LayerFS implementation.
