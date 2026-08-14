@@ -12,6 +12,12 @@ Source baselines:
 
 Drive9 supplies a persistent workspace and durable evidence. It does not supply a shell, process sandbox, language server, or compute runtime.
 
+DeepSeek Harness owns the agent loop and session history. Drive9 owns the persistent
+workspace and immutable evidence. The user's DSH deployment owns the runtime and
+sandbox. A Drive9 mount is only the bridge that exposes Workspace inside Runtime; it
+does not turn Drive9 into an always-on computer or couple workspace lifetime to runtime
+lifetime.
+
 The workspace is mounted before DeepSeek Harness starts. V1 has two explicit consistency profiles:
 
 - `strong` is the default and recommended profile. It uses a Linux Drive9 FUSE mount created with `drive9 mount --mode=fuse --profile=none`; the mount and every process-backed Harness capability run in the same host, container, or VM.
@@ -30,7 +36,8 @@ One npm package, `@drive9-ai/drive9-dsh`, exposes independent Cordis components:
 - `@drive9-ai/drive9-dsh/filesystem` — `Drive9FileSystem`, registered as `ctx.fs`.
 - `@drive9-ai/drive9-dsh/evidence` — `Drive9EvidenceStore`, registered as `ctx.spillStore`.
 - `@drive9-ai/drive9-dsh/result-tools` — bounded `result_read` and `result_search` tools.
-- `@drive9-ai/drive9-dsh` — a programmatic preset that installs all three components.
+- `@drive9-ai/drive9-dsh/runtime-context` — model-visible eventual-consistency warning.
+- `@drive9-ai/drive9-dsh` — a programmatic preset that installs all four components.
 - `@drive9-ai/drive9-dsh/cordis.patch.yml` — a DSH bundle patch for one-command installation.
 
 The single package keeps installation simple without merging unrelated responsibilities. Every component remains independently importable and testable.
@@ -69,7 +76,22 @@ Model-facing storage operations use the Drive9 SDK. The mount is used only for c
 
 An SDK revision check followed by a mount write is forbidden: it is a check-then-write race and is not a valid implementation of `replaceIfVersion`.
 
-In `strong`, after an SDK write succeeds the provider waits for the mounted path to expose the exact bytes before returning. It fails with `FS_IO_ERROR` rather than claiming a coherent execution world when the mount remains stale. In `eventual`, the provider returns after the SDK CAS succeeds and makes no mounted read-your-writes promise; subprocess validation is therefore unsuitable immediately after a model write.
+In `strong`, after an SDK write commits the provider waits for the mounted path to expose
+the exact bytes. Ordinary success means both facts are true. If the commit succeeds but
+the mount cannot be confirmed within the bounded coherence window, the provider throws
+`DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED`, carrying
+`workspaceCommitted: true`, the committed version, and reason `timeout`, `aborted`, or
+`io`. This is neither ordinary success nor proof that no write occurred, so callers must
+inspect or reconcile rather than blindly retry. Caller cancellation is observed during
+the coherence wait; after commit it becomes the same structured committed outcome with
+reason `aborted` and an `FS_ABORTED` cause. In `eventual`, the provider returns after the
+SDK CAS succeeds and makes no mounted read-your-writes promise; subprocess validation is
+therefore unsuitable immediately after a model write.
+
+Every mutation also enforces DSH's per-call sandbox policy. `read-only` denies writes,
+`workspace-write` re-resolves the target and requires the fresh canonical process path
+under a DSH writable root, and `danger-full-access` delegates without that fence. The
+bundle replaces the stock filesystem provider, not the shared sandbox-policy service.
 
 ### Startup proof
 
@@ -83,7 +105,7 @@ In `strong`, the filesystem service does not become injectable until it has:
 
 Failure aborts plugin startup. There is no automatic fallback to a host-local directory and no automatic downgrade to `eventual` or metadata-based local stale detection.
 
-In `eventual`, `verifyCoherence` defaults to `false`: startup validates the mount directory and remote root, logs the relaxed-consistency warning, and skips the bidirectional proof. If an operator explicitly sets `verifyCoherence: true`, the proof runs and any failure remains fatal. The implementation never suppresses that explicit request.
+In `eventual`, `verifyCoherence` defaults to `false`: startup validates the mount directory and remote root, logs the relaxed-consistency warning, and contributes that warning to the model-visible runtime-context snapshot. If an operator explicitly sets `verifyCoherence: true`, the complete proof runs and any failure remains fatal. The implementation never suppresses that explicit request.
 
 The behavioral proof remains mandatory for the default strong profile. Disabling it does not make a local overlay or split SDK/process world supported.
 
@@ -149,7 +171,8 @@ This preserves tool success and avoids broken references. Source-streaming, cras
 - 401/403 → `FS_PERMISSION_DENIED`;
 - atomic revision conflict → `FS_STALE_VERSION` or `FS_NOT_OBSERVED`, according to the requested intent;
 - cancellation before publication → `FS_ABORTED`;
-- unavailable backend, incoherent mount, invalid provider target, or exhausted internal CAS retry → `FS_IO_ERROR`.
+- unavailable backend, invalid provider target, or exhausted internal CAS retry → `FS_IO_ERROR`;
+- committed Drive9 write whose mount visibility is unconfirmed → `DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED` with `workspaceCommitted: true`.
 
 Errors never include API keys or authorization headers.
 
@@ -167,6 +190,9 @@ The release must include discriminating tests for:
 8. evidence locator rejection by filesystem resolution/path methods.
 9. a real DeepSeek Harness agent loop in which the model uses the filesystem tool, a process-backed tool observes the same mounted bytes, an oversized result spills, and later model calls retrieve it with `result_search`/`result_read`.
 10. explicit profile discrimination: `strong` retains startup proof and post-write mount waiting; `eventual` warns, skips both by default, commits through SDK CAS, and never weakens an explicitly requested proof.
+11. standard DSH posture: namespace-shaped function plugins, a real composed config with exactly one active `fs` provider, and the canonical `dsh plugin --profile web add ...` / `dsh web` flow.
+12. DSH sandbox-policy discrimination: read-only denies without committing, workspace-write accepts only a fresh target under a writable root, and the tool layer observes a confining `sandboxMode`.
+13. committed-but-unconfirmed discrimination: the outcome code is distinct from `FS_IO_ERROR`, the committed revision remains observable, and caller cancellation during mount verification is not swallowed.
 
 Hosted CI must run type checking, unit tests, the fake-Drive9 integration suite, package build, and `npm pack --dry-run`. A separately documented opt-in release test exercises a real Drive9 service and Linux FUSE mount, rejects other filesystem types, and proves both SDK-to-process and process-close-to-newer-SDK-revision propagation.
 

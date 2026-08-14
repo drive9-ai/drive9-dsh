@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { FsError } from '@deepseek-ai/dsh-fs'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Drive9FileSystem } from '../src/filesystem.js'
 import type { Drive9MountConsistency } from '../src/filesystem.js'
+import { DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED } from '../src/mount-error.js'
 import { FakeDrive9Client, FakeStatusError } from './fake-drive9.js'
 
 const roots: string[] = []
@@ -29,8 +31,9 @@ async function setup(overrides: {
   mirrorDeletes?: boolean
   mountConsistency?: Drive9MountConsistency
   hangMountStat?: boolean
+  mountParent?: string
 } = {}) {
-  const mountRoot = await mkdtemp(join(tmpdir(), 'drive9-dsh-fs-'))
+  const mountRoot = await mkdtemp(join(overrides.mountParent ?? tmpdir(), 'drive9-dsh-fs-'))
   roots.push(mountRoot)
   const client = new FakeDrive9Client(overrides.mirrored === false
     ? {}
@@ -42,6 +45,7 @@ async function setup(overrides: {
       })
   client.mkdirRecord('/workspace')
   const context = new Context().intercept('logger', { level: 2 })
+  await context.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: mountRoot })
   const FileSystemClass = overrides.hangMountStat === true ? HangingMountStatFileSystem : Drive9FileSystem
   const fs = new FileSystemClass(context, {
     mountRoot,
@@ -53,6 +57,12 @@ async function setup(overrides: {
     coherencePollMs: 2,
   }, () => client)
   return { fs, client, context, mountRoot }
+}
+
+async function contextWithPolicy(workspaceRoot: string): Promise<Context> {
+  const context = new Context().intercept('logger', { level: 2 })
+  await context.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot })
+  return context
 }
 
 async function expectFsCode(promise: Promise<unknown>, code: string): Promise<void> {
@@ -74,20 +84,20 @@ describe('Drive9FileSystem', () => {
 
   it('fails startup for missing, non-directory, and remote-file roots', async () => {
     const { fs, client, mountRoot } = await setup({ verifyCoherence: false })
-    const missing = new Drive9FileSystem(new Context(), {
+    const missing = new Drive9FileSystem(await contextWithPolicy(mountRoot), {
       mountRoot: join(mountRoot, 'missing'), remoteRoot: '/workspace', apiKey: 'workspace-key', verifyCoherence: false,
     }, () => client)
     await expect(missing.initialize()).rejects.toThrow(/not readable and writable/)
 
     const fileRoot = join(mountRoot, 'not-a-directory')
     await writeFile(fileRoot, 'x')
-    const notDirectory = new Drive9FileSystem(new Context(), {
+    const notDirectory = new Drive9FileSystem(await contextWithPolicy(mountRoot), {
       mountRoot: fileRoot, remoteRoot: '/workspace', apiKey: 'workspace-key', verifyCoherence: false,
     }, () => client)
     await expect(notDirectory.initialize()).rejects.toThrow(/is not a directory/)
 
     client.setFile('/remote-file', 'x')
-    const remoteFile = new Drive9FileSystem(new Context(), {
+    const remoteFile = new Drive9FileSystem(await contextWithPolicy(mountRoot), {
       mountRoot, remoteRoot: '/remote-file', apiKey: 'workspace-key', verifyCoherence: false,
     }, () => client)
     await expect(remoteFile.initialize()).rejects.toThrow(/is not a directory/)
@@ -98,7 +108,7 @@ describe('Drive9FileSystem', () => {
     const { client, mountRoot } = await setup({ verifyCoherence: false })
     await chmod(mountRoot, 0o500)
     try {
-      const readOnly = new Drive9FileSystem(new Context(), {
+      const readOnly = new Drive9FileSystem(await contextWithPolicy(mountRoot), {
         mountRoot, remoteRoot: '/workspace', apiKey: 'workspace-key', verifyCoherence: false,
       }, () => client)
       await expect(readOnly.initialize()).rejects.toThrow(/not readable and writable/)
@@ -185,7 +195,12 @@ describe('Drive9FileSystem', () => {
 
     await fs.initialize()
     const target = await fs.resolve('stale-mount.txt')
-    await expectFsCode(fs.writeText(target, 'committed remotely', { kind: 'createIfAbsent' }), 'FS_IO_ERROR')
+    await expect(fs.writeText(target, 'committed remotely', { kind: 'createIfAbsent' })).rejects.toMatchObject({
+      code: DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED,
+      workspaceCommitted: true,
+      committedVersion: expect.stringMatching(/^d9rev:v1:/u),
+      reason: 'timeout',
+    })
     expect(Buffer.from(client.getFile('/workspace/stale-mount.txt') ?? []).toString('utf8')).toBe('committed remotely')
     await expect(readFile(fs.processPath(target), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -195,9 +210,63 @@ describe('Drive9FileSystem', () => {
     await fs.initialize()
     const target = await fs.resolve('blocked-mount.txt')
 
-    await expectFsCode(fs.writeText(target, 'committed remotely', { kind: 'createIfAbsent' }), 'FS_IO_ERROR')
+    await expect(fs.writeText(target, 'committed remotely', { kind: 'createIfAbsent' })).rejects.toMatchObject({
+      code: DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED,
+      workspaceCommitted: true,
+      reason: 'timeout',
+    })
     expect(Buffer.from(client.getFile('/workspace/blocked-mount.txt') ?? []).toString('utf8')).toBe('committed remotely')
   }, 1_000)
+
+  it('observes caller cancellation after commit without reporting the write as absent', async () => {
+    const { fs, client } = await setup({ verifyCoherence: false, mirrorWrites: false, hangMountStat: true })
+    await fs.initialize()
+    const target = await fs.resolve('cancelled-mount-wait.txt')
+    const controller = new AbortController()
+    const writing = fs.writeText(target, 'committed before cancellation', { kind: 'createIfAbsent' }, controller.signal)
+    while (client.getFile('/workspace/cancelled-mount-wait.txt') === undefined) await new Promise(resolve => setTimeout(resolve, 1))
+    controller.abort()
+    await expect(writing).rejects.toMatchObject({
+      code: DRIVE9_WORKSPACE_COMMITTED_MOUNT_UNCONFIRMED,
+      workspaceCommitted: true,
+      reason: 'aborted',
+      cause: expect.objectContaining({ code: 'FS_ABORTED' }),
+    })
+    expect(Buffer.from(client.getFile('/workspace/cancelled-mount-wait.txt') ?? []).toString('utf8'))
+      .toBe('committed before cancellation')
+  })
+
+  it('enforces the standard per-call filesystem sandbox policy', async () => {
+    const { fs, client, mountRoot } = await setup({ verifyCoherence: false, mountParent: process.cwd() })
+    await fs.initialize()
+    const target = await fs.resolve('policy.txt')
+
+    await expectFsCode(fs.writeText(
+      target,
+      'denied',
+      { kind: 'createIfAbsent' },
+      undefined,
+      { mode: 'read-only', workspaceRoot: mountRoot },
+    ), 'FS_SANDBOX_DENIED')
+    expect(client.getFile('/workspace/policy.txt')).toBeUndefined()
+
+    await expect(fs.writeText(
+      target,
+      'allowed',
+      { kind: 'createIfAbsent' },
+      undefined,
+      { mode: 'workspace-write', workspaceRoot: mountRoot },
+    )).resolves.toMatchObject({ operation: 'create' })
+
+    await expectFsCode(fs.writeText(
+      target,
+      'outside',
+      undefined,
+      undefined,
+      { mode: 'workspace-write', workspaceRoot: join(mountRoot, 'other') },
+    ), 'FS_SANDBOX_DENIED')
+    expect(Buffer.from(client.getFile('/workspace/policy.txt') ?? []).toString('utf8')).toBe('allowed')
+  })
 
   it('fails startup when the mount and SDK are not one execution world', async () => {
     const { fs } = await setup({ mirrored: false })

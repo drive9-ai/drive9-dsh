@@ -19,6 +19,7 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import * as SpillPolicy from '@deepseek-ai/dsh-spill-policy'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
@@ -27,7 +28,7 @@ import { Drive9EvidenceStore } from '../src/evidence.js'
 import type { Drive9EvidenceConfig } from '../src/evidence.js'
 import { Drive9FileSystem } from '../src/filesystem.js'
 import type { Drive9FileSystemConfig } from '../src/filesystem.js'
-import resultTools from '../src/result-tools.js'
+import * as resultTools from '../src/result-tools.js'
 import { FakeDrive9Client } from './fake-drive9.js'
 
 const execFileAsync = promisify(execFile)
@@ -144,6 +145,7 @@ describe('real DeepSeek Harness agent loop', () => {
     await mountAgentLoopTestDependencies(context, {
       systemPrompt: { persona: 'Use the available tools to verify the Drive9 integration.' },
     })
+    await context.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: mountRoot })
     await context.plugin(AgentLoop, { agents: [] })
     context.llm.registerAdapter(['scripted'], adapter)
     await context.plugin(TestWorkspace, {

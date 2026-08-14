@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { CallId } from '@deepseek-ai/dsh-llm'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SaveTextSpill } from '@deepseek-ai/dsh-spill'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -148,7 +149,9 @@ describe('Drive9EvidenceStore', () => {
     const mountRoot = await mkdtemp(join(tmpdir(), 'drive9-dsh-evidence-isolation-'))
     roots.push(mountRoot)
     const workspace = new FakeDrive9Client({ mountRoot, remoteRoot: '/workspace' })
-    const workspaceFs = new Drive9FileSystem(new Context(), {
+    const workspaceContext = new Context()
+    await workspaceContext.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: mountRoot })
+    const workspaceFs = new Drive9FileSystem(workspaceContext, {
       mountRoot,
       remoteRoot: '/workspace',
       apiKey: 'workspace-key',

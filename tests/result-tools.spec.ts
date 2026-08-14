@@ -7,8 +7,8 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 import { Drive9EvidenceStore } from '../src/evidence.js'
-import resultTools, {
-  apply as applyResultTools,
+import * as resultTools from '../src/result-tools.js'
+import {
   HARD_MAX_RETURN_BYTES,
   HARD_MAX_RETURN_LINES,
   HARD_MAX_SCAN_BYTES,
@@ -142,7 +142,7 @@ describe('Drive9 result tools', () => {
       { maxScanBytes: HARD_MAX_SCAN_BYTES + 1 },
     ]
     for (const config of invalidConfigs) {
-      expect(() => applyResultTools(new Context(), config)).toThrow(/must be an integer between/)
+      expect(() => resultTools.apply(new Context(), config)).toThrow(/must be an integer between/)
     }
 
     const { ctx, store } = await setup({})
