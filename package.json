@@ -1,0 +1,101 @@
+{
+  "name": "@drive9-ai/drive9-dsh",
+  "version": "0.1.0",
+  "description": "Drive9 workspace and durable evidence components for DeepSeek Harness",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./filesystem": {
+      "types": "./dist/filesystem.d.ts",
+      "default": "./dist/filesystem.js"
+    },
+    "./evidence": {
+      "types": "./dist/evidence.d.ts",
+      "default": "./dist/evidence.js"
+    },
+    "./result-tools": {
+      "types": "./dist/result-tools.d.ts",
+      "default": "./dist/result-tools.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "docs"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist coverage",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:race": "vitest run --pool=forks --maxWorkers=4",
+    "test:real": "vitest run --config vitest.real.config.ts",
+    "lint:package": "publint",
+    "prepack": "npm run clean && npm run build"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/drive9-ai/drive9-dsh.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek",
+    "agent",
+    "harness",
+    "workspace",
+    "evidence"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.1",
+    "drive9": "0.1.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-fs": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-spill": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-loop": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-loop-testkit": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-fs": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-fs-observation-policy": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-output-retention": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-spill": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-spill-policy": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-fs": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@types/node": "24.12.4",
+    "publint": "0.3.21",
+    "tsx": "4.22.1",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  }
+}
