@@ -1,0 +1,177 @@
+name: Secret Scan
+
+# Scans the commits a pull request adds for committed credentials.
+#
+# Enforcing it requires the repository ruleset to list the `gitleaks` status
+# check; the workflow alone cannot block a merge, so until the ruleset is
+# updated this scan is advisory.
+#
+# `pull_request_target` loads this definition from the default branch, not from
+# the pull request, so the gate cannot be weakened by the change it is meant to
+# inspect. Nothing from the pull request is ever executed: the scanner is
+# downloaded from the version pinned below into a per-run directory outside the
+# workspace, and the PR checkout is read only for its git objects. Allowlist
+# additions in `.gitleaks.toml` therefore take effect only once they are merged,
+# and the scanner ignores any `.gitleaksignore` shipped by the PR.
+#
+# Bootstrap: `pull_request_target` only runs when this file already exists on the
+# default branch, so the PR that introduces it is not itself gated — every later
+# PR is.
+#
+# The equivalent local command downloads the same pinned scanner and scans the
+# history — advisory only, because a local run has none of the guards below
+# (merge-base allowlist, `--ignore-gitleaks-allow`):
+#
+#   curl -fsSL -o /tmp/gitleaks.tar.gz \
+#     https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+#   tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+#   /tmp/gitleaks git . --no-banner --redact --log-opts="--all"
+#
+# `workflow_dispatch` audits the full history of the selected ref.
+on:
+  pull_request_target:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: secret-scan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The release digests for this version are pinned below; bump them together
+  # with the version, never one without the other.
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  GITLEAKS_LINUX_ARM64_SHA256: e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout the PR head (read only, never executed)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # refs/pull/<n>/head exists for every PR, including conflicting ones.
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.ref }}
+          # The PR commit range and its merge-base allowlist are resolved with
+          # git, so the base commit must be present locally.
+          fetch-depth: 0
+          # The scan never pushes; do not leave the token in .git/config.
+          persist-credentials: false
+
+      - name: Install gitleaks
+        # The scanner must not be read from the checkout: a pull request could
+        # commit a binary that reports the same version and have this job run it.
+        # Download into a per-run directory outside the workspace, never reuse a
+        # pre-existing or cached binary, and verify the pinned digest as well as
+        # the reported version.
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/gitleaks-bin"
+          mkdir -p "$install_dir"
+          case "$(uname -m)" in
+            x86_64)
+              arch=x64
+              expected_sha="$GITLEAKS_LINUX_X64_SHA256"
+              ;;
+            aarch64)
+              arch=arm64
+              expected_sha="$GITLEAKS_LINUX_ARM64_SHA256"
+              ;;
+            *)
+              echo "unsupported runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${arch}.tar.gz"
+          printf '%s  %s\n' "$expected_sha" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$install_dir" gitleaks
+          rm -f "$archive"
+          scanner="$install_dir/gitleaks"
+          case "$scanner" in
+            "$GITHUB_WORKSPACE"/*)
+              echo "refusing to run a scanner from the checkout" >&2
+              exit 1
+              ;;
+          esac
+          reported="$("$scanner" version)"
+          if [ "$reported" != "$GITLEAKS_VERSION" ]; then
+            echo "refusing to run an unexpected scanner build: version=$reported" >&2
+            exit 1
+          fi
+          echo "scanner: $scanner (gitleaks $reported)"
+
+      - name: Scan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/gitleaks-bin/gitleaks"
+          case "$scanner" in
+            "$GITHUB_WORKSPACE"/*)
+              echo "refusing to run a scanner from the checkout" >&2
+              exit 1
+              ;;
+          esac
+          # `--text` keeps a PR-controlled `.gitattributes` (`-diff`/`binary`)
+          # from hiding a file from `git log -p`. `--diff-merges=remerge` scans
+          # the merge result, so a credential introduced while resolving a
+          # conflict is seen, while content merely inherited from the base
+          # branch is not re-reported (which plain `-m` would do).
+          if [ -n "$BASE_SHA" ]; then
+            range="$BASE_SHA..$HEAD_SHA"
+            config_ref="$BASE_SHA"
+          else
+            range="--all"
+            config_ref="HEAD"
+          fi
+          log_opts="$range --text --diff-merges=remerge"
+
+          # Trusted allowlist: the merge base for a PR, the checked-out ref for a
+          # manual run. If that revision predates .gitleaks.toml, fall back to the
+          # built-in rules with no allowlist — stricter, never the PR's own copy.
+          if git show "$config_ref:.gitleaks.toml" > "$RUNNER_TEMP/gitleaks.toml" 2>/dev/null; then
+            echo "allowlist source: $config_ref:.gitleaks.toml"
+          else
+            printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks.toml"
+            echo "allowlist source: built-in defaults, no allowlist ($config_ref has no .gitleaks.toml)"
+          fi
+
+          # gitleaks exits 0 with "0 commits scanned" when git cannot read the
+          # requested history, so traverse the range first and fail closed.
+          if ! git log -p -U0 $log_opts >/dev/null 2>&1; then
+            echo "cannot read the full history of '$log_opts' (missing objects or an unknown revision)" >&2
+            exit 1
+          fi
+
+          # `--diff-merges=remerge` emits no patch for merges with three or more
+          # parents, so such a commit could hide a credential; refuse to report a
+          # pass instead of scanning nothing for it.
+          octopus="$(git rev-list --merges --min-parents=3 $range)"
+          if [ -n "$octopus" ]; then
+            echo "octopus merge(s) in '$range' cannot be remerge-diffed:" >&2
+            echo "$octopus" >&2
+            echo "re-create the merge with two parents, or review its result manually" >&2
+            exit 1
+          fi
+
+          # Belt and braces: the allowlist and ignore lookups must never resolve
+          # inside the pull request's checkout.
+          rm -f "$GITHUB_WORKSPACE/.gitleaksignore"
+
+          # --ignore-gitleaks-allow: an inline `gitleaks:allow` comment is a
+          # suppression, and a pull request must not be able to suppress its own
+          # finding.
+          "$scanner" git . --no-banner --redact \
+            --config "$RUNNER_TEMP/gitleaks.toml" \
+            --gitleaks-ignore-path "$RUNNER_TEMP" \
+            --ignore-gitleaks-allow \
+            --log-opts="$log_opts"
