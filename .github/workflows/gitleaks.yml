@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout the PR head (read only, never executed)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # refs/pull/<n>/head exists for every PR, including conflicting ones.
           ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.ref }}
@@ -63,6 +63,15 @@ jobs:
           fetch-depth: 0
           # The scan never pushes; do not leave the token in .git/config.
           persist-credentials: false
+          # checkout >= v7 refuses to check out a fork pull request under
+          # `pull_request_target` unless this is set. The guard exists because
+          # such workflows run with the base repository's token and secrets, and
+          # running a fork's code there is a "pwn request". This job only ever
+          # reads git objects from the checkout: it runs no script, build, test,
+          # hook, or filter from the tree, and it installs its scanner and writes
+          # its config outside the workspace. Nothing from the pull request is
+          # executed.
+          allow-unsafe-pr-checkout: true
 
       - name: Install gitleaks
         # The scanner must not be read from the checkout: a pull request could
