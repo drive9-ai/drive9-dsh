@@ -104,7 +104,9 @@ explicitly prohibit assuming the command stopped or blindly repeating it.
 Disposal first closes admission, then aborts all in-flight calls and waits at most
 25 seconds (the SDK cancellation HTTP deadline is 20 seconds). An unknown outcome
 or an unfinished call makes shutdown reject with `DRIVE9_EXEC_OUTCOME_UNKNOWN`;
-it never reports successful cleanup. Every pending promise has a rejection
+it never reports successful cleanup. The first unresolved outcome is retained even
+after its call has returned, so a later successful command cannot erase it. A new
+provider instance requires a new lifecycle; shutdown does not clear this record. Every pending promise has a rejection
 handler even if the shutdown deadline expires. There is no retry or second exec.
 
 ## Required validation

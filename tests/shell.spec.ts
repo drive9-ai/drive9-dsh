@@ -158,6 +158,17 @@ describe('Drive9 foreground shell', () => {
     await ready; await expect(shell.close()).rejects.toMatchObject({ code: 'DRIVE9_EXEC_OUTCOME_UNKNOWN' }); await outcome
   })
 
+  it('retains an already returned unknown outcome across later completion and shutdown', async () => {
+    const f = await setup()
+    f.workspace.exec = async () => { throw new RuntimeOutcomeUnknownError('lost terminal', 'rex_unknown_before_close') }
+    const shell = await f.mount()
+    await expect(shell.run(shell.resolve({ command: 'first command' }))).rejects.toMatchObject({ code: 'DRIVE9_EXEC_OUTCOME_UNKNOWN' })
+    f.workspace.exec = async () => ({ executionId: 'rex_later', exitCode: 0, durationMs: 1, sandbox: '' })
+    expect(await shell.run(shell.resolve({ command: 'inspect result' }))).toMatchObject({ exitCode: 0 })
+    await expect(shell.close()).rejects.toMatchObject({ code: 'DRIVE9_EXEC_OUTCOME_UNKNOWN', message: expect.stringContaining('rex_unknown_before_close') })
+    await expect(shell.close()).rejects.toMatchObject({ code: 'DRIVE9_EXEC_OUTCOME_UNKNOWN' })
+  })
+
   it('bounds shutdown for an unresponsive SDK and handles its eventual rejection', async () => {
     const f = await setup()
     let started!: () => void; const ready = new Promise<void>(resolve => { started = resolve })

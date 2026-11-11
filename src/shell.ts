@@ -78,6 +78,7 @@ export class Drive9Shell extends ShellExecutor {
   private ready = false
   private closing = false
   private closePromise: Promise<void> | undefined
+  private unresolved: HarnessError | undefined
   private readonly active = new Map<AbortController, Promise<ShellRunResult>>()
 
   constructor(ctx: Context, config: Drive9ShellConfig = {}) {
@@ -155,7 +156,10 @@ export class Drive9Shell extends ShellExecutor {
     const timer = setTimeout(() => {
       if (!signal.aborted) { deadlineExpired = true; controller.abort() }
     }, spec.timeoutMs)
-    const work = this.execute(spec, signal, () => deadlineExpired)
+    const work = this.execute(spec, signal, () => deadlineExpired).catch((error: unknown) => {
+      if (error instanceof HarnessError && error.code === 'DRIVE9_EXEC_OUTCOME_UNKNOWN') this.unresolved ??= error
+      throw error
+    })
     this.active.set(controller, work)
     void work.finally(() => { clearTimeout(timer); this.active.delete(controller) }).catch(() => {})
     return work
@@ -227,11 +231,9 @@ export class Drive9Shell extends ShellExecutor {
     this.closing = true
     const pending = [...this.active.entries()]
     for (const [controller] of pending) controller.abort()
-    const results = await bounded(Promise.allSettled(pending.map(([, work]) => work)), SHUTDOWN_TIMEOUT_MS,
+    await bounded(Promise.allSettled(pending.map(([, work]) => work)), SHUTDOWN_TIMEOUT_MS,
       () => fail('OUTCOME_UNKNOWN', 'Runtime shutdown exceeded 25 seconds; remote stop is unconfirmed'))
-    for (const result of results) {
-      if (result.status === 'rejected' && result.reason instanceof HarnessError && result.reason.code === 'DRIVE9_EXEC_OUTCOME_UNKNOWN') throw result.reason
-    }
+    if (this.unresolved) throw this.unresolved
   }
 }
 

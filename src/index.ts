@@ -38,14 +38,14 @@ export interface Drive9DshConfig {
   readonly filesystem: Drive9FileSystemConfig
   readonly evidence: Drive9EvidenceConfig
   readonly resultTools?: Drive9ResultToolsConfig
-  readonly runtime?: Drive9ShellConfig
+  readonly runtime?: Drive9ShellConfig | undefined
 }
 
 export const Config: z<Drive9DshConfig> = z.object({
   filesystem: Drive9FileSystem.Config.required(),
   evidence: Drive9EvidenceStore.Config.required(),
   resultTools: resultTools.Config.default({}),
-  runtime: Drive9Shell.Config,
+  runtime: z.union([z.const(undefined), Drive9Shell.Config]),
 })
 
 export async function apply(ctx: Context, config: Drive9DshConfig): Promise<void> {
