@@ -1,5 +1,5 @@
 # Replace the base filesystem and spill backend while retaining DSH's stock
-# filesystem tools, observation policy, subprocess runtime, and spill policy.
+# filesystem tools, observation policy and spill policy. Runtime is opt-in.
 
 - id: fs-sandbox
   disabled: true
@@ -32,3 +32,16 @@
       name: '@drive9/drive9-dsh/runtime-context'
       config:
         mountConsistency: !!js process.env.DRIVE9_MOUNT_CONSISTENCY ?? 'strong'
+
+# Opt-in replaces the POSIX shell only. It never changes sandbox-policy.
+- id: bash-sandbox
+  disabled: !!js process.platform === 'win32' || process.env.DRIVE9_EXEC === 'true'
+
+- id: tool-bash
+  config:
+    enableRunInBackground: !!js process.env.DRIVE9_EXEC !== 'true'
+
+- insert:
+    - id: drive9-shell
+      name: '@drive9/drive9-dsh/shell'
+      disabled: !!js process.env.DRIVE9_EXEC !== 'true'
