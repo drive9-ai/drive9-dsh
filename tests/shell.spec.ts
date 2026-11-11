@@ -1,14 +1,16 @@
-import { mkdir, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { RuntimeBusyError, RuntimeCanceledError, RuntimeExecutionError, RuntimeNotEnabledError, RuntimeOutcomeUnknownError, RuntimeStartError, RuntimeTimeoutError } from 'drive9'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Drive9Shell } from '../src/shell.js'
 import { OutputTail } from '../src/shell-output.js'
 import { shellFixture } from './shell-fixture.js'
 
+vi.mock('node:fs/promises', async importOriginal => ({ ...await importOriginal<object>(), stat: vi.fn((...args: Parameters<typeof stat>) => importOriginal<typeof import('node:fs/promises')>().then(module => module.stat(...args))) }))
 vi.mock('node:os', async importOriginal => ({ ...await importOriginal<object>(), platform: () => 'linux' }))
 const fixtures: Awaited<ReturnType<typeof shellFixture>>[] = []
 async function setup() { const fixture = await shellFixture(); fixtures.push(fixture); return fixture }
-afterEach(async () => { vi.useRealTimers(); await Promise.all(fixtures.splice(0).map(f => f.cleanup())) })
+afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); await Promise.all(fixtures.splice(0).map(f => f.cleanup())) })
 
 describe('Drive9 foreground shell', () => {
   it('sends exact Bash argv, root-relative cwd and only explicit managed env', async () => {
@@ -134,6 +136,30 @@ describe('Drive9 foreground shell', () => {
     expect(await run).toMatchObject({ exitCode: 124, timedOut: true, aborted: false })
   })
 
+  it.each([['resolve', 'deadline'], ['stat', 'deadline'], ['resolve', 'caller'], ['stat', 'caller']] as const)('bounds a blocked %s before exec on %s and never dispatches late', async (operation, cause) => {
+    const f = await setup(); const shell = await f.mount()
+    const originalResolve = f.context.fs.resolve.bind(f.context.fs)
+    const target = await originalResolve(f.root)
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    let entered!: () => void; const ready = new Promise<void>(resolve => { entered = resolve })
+    if (operation === 'resolve') vi.spyOn(f.context.fs, 'resolve').mockImplementationOnce(async () => { entered(); await blocked; return target })
+    else {
+      const realInfo = await stat(f.root)
+      vi.mocked(stat).mockImplementationOnce(async () => { entered(); await blocked; return realInfo })
+    }
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const run = expect(shell.run(shell.resolve({ command: 'must not execute', timeoutMs: 100, signal: controller.signal }))).rejects.toMatchObject({ code: cause === 'deadline' ? 'DRIVE9_EXEC_START_FAILED' : 'TOOL_ABORTED', message: expect.stringContaining('no command was sent') })
+    await ready
+    if (cause === 'caller') controller.abort()
+    else await vi.advanceTimersByTimeAsync(100)
+    await run
+    await shell.close()
+    release(); await Promise.resolve(); await Promise.resolve()
+    expect(f.calls).toHaveLength(0)
+  })
+
   it('closes admission, waits for cancellation, and preserves a normal terminal race', async () => {
     const f = await setup()
     let started!: () => void; const ready = new Promise<void>(resolve => { started = resolve })
@@ -156,6 +182,21 @@ describe('Drive9 foreground shell', () => {
     const shell = await f.mount(); const run = shell.run(shell.resolve({ command: 'sleep 1' }))
     const outcome = expect(run).rejects.toMatchObject({ code: 'DRIVE9_EXEC_OUTCOME_UNKNOWN' })
     await ready; await expect(shell.close()).rejects.toMatchObject({ code: 'DRIVE9_EXEC_OUTCOME_UNKNOWN' }); await outcome
+  })
+
+  it('actual Cordis plugin disposal cancels and drains an in-flight command', async () => {
+    const f = await setup()
+    let started!: () => void; const ready = new Promise<void>(resolve => { started = resolve })
+    f.workspace.exec = async (_, options) => new Promise((_, reject) => {
+      options!.signal!.addEventListener('abort', () => reject(new RuntimeCanceledError('stopped', 'rex_dispose')), { once: true }); started()
+    })
+    const plugin = f.context.plugin(Drive9Shell)
+    await plugin
+    const shell = f.context.shell as Drive9Shell
+    const run = shell.run(shell.resolve({ command: 'sleep 1' }))
+    await ready; await plugin.dispose()
+    expect(await run).toMatchObject({ exitCode: 130, aborted: true, timedOut: false })
+    expect(() => shell.resolve({ command: 'echo' })).toThrow(/closing/)
   })
 
   it('retains an already returned unknown outcome across later completion and shutdown', async () => {

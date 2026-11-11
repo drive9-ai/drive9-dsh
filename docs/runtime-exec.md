@@ -81,6 +81,11 @@ may override that default within the same cap; stderr keeps the configured cap.
 Overrides must be positive safe integers; zero, negatives, fractions, non-finite
 values and invalid types are rejected. Oversized positive integers are clamped.
 
+Directory resolution and stat are awaited only until cancellation/deadline. If
+FUSE is blocked, the read-only lookup can finish later, but cannot dispatch exec
+after the call has failed. A pre-dispatch deadline is `DRIVE9_EXEC_START_FAILED`
+with an explicit “no command was sent” message, not a claimed remote timeout.
+
 The same timeout also bounds client observation: its deadline requests cancellation
 through the SDK. A confirmed cancellation caused by that deadline is a timeout;
 failed confirmation remains an unknown outcome. Caller cancellation or shutdown
@@ -103,8 +108,10 @@ explicitly prohibit assuming the command stopped or blindly repeating it.
 
 Disposal first closes admission, then aborts all in-flight calls and waits at most
 25 seconds (the SDK cancellation HTTP deadline is 20 seconds). An unknown outcome
-or an unfinished call makes shutdown reject with `DRIVE9_EXEC_OUTCOME_UNKNOWN`;
-it never reports successful cleanup. The first unresolved outcome is retained even
+or an unfinished call makes the provider's `close()` reject with
+`DRIVE9_EXEC_OUTCOME_UNKNOWN`; it never reports successful cleanup. Cordis logs
+errors from disposal hooks instead of rejecting the outer fiber disposal, so a
+fulfilled `fiber.dispose()` alone is not confirmation of remote cleanup. The first unresolved outcome is retained even
 after its call has returned, so a later successful command cannot erase it. A new
 provider instance requires a new lifecycle; shutdown does not clear this record. Every pending promise has a rejection
 handler even if the shutdown deadline expires. There is no retry or second exec.

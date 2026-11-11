@@ -59,6 +59,25 @@ async function bounded<T>(work: Promise<T>, ms: number, error: () => Error): Pro
   }
 }
 
+/** FUSE lookup is not abortable at the OS boundary; stop awaiting it before dispatch. */
+async function beforeDispatch<T>(work: Promise<T>, signal: AbortSignal, deadlineExpired: () => boolean): Promise<T> {
+  let removeListener = () => {}
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => {
+      const abort = () => reject(deadlineExpired()
+        ? fail('START_FAILED', 'Command deadline expired before dispatch; no command was sent')
+        : new HarnessError('Command aborted before dispatch; no command was sent', 'TOOL_ABORTED'))
+      if (signal.aborted) abort()
+      else {
+        signal.addEventListener('abort', abort, { once: true })
+        removeListener = () => signal.removeEventListener('abort', abort)
+      }
+    })])
+  } finally {
+    removeListener()
+  }
+}
+
 export class Drive9Shell extends ShellExecutor {
   static inject = ['fs', 'spillStore', 'sandboxPolicy']
   static Config: z<Drive9ShellConfig> = z.object({
@@ -167,9 +186,9 @@ export class Drive9Shell extends ShellExecutor {
 
   private async execute(spec: ShellExecSpec, signal: AbortSignal, deadlineExpired: () => boolean): Promise<ShellRunResult> {
     const fs = this.filesystem
-    const target = await fs.resolve(spec.workdir, { cwd: this.root, signal })
+    const target = await beforeDispatch(fs.resolve(spec.workdir, { cwd: this.root, signal }), signal, deadlineExpired)
     const processPath = fs.processPath(target)
-    if (!(await stat(processPath)).isDirectory()) throw fail('INVALID_REQUEST', 'workdir must be an existing workspace directory')
+    if (!(await beforeDispatch(stat(processPath), signal, deadlineExpired)).isDirectory()) throw fail('INVALID_REQUEST', 'workdir must be an existing workspace directory')
     const cwd = posix.relative(this.root, processPath) || '.'
     const env: Record<string, string> = {}
     for (const [key, value] of Object.entries(spec.env ?? {})) {
