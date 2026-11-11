@@ -6,11 +6,11 @@ Source baselines:
 
 - DeepSeek Harness `47f943859bef60e4160492346772ded9b24f765a`
 - `@deepseek-ai/dsh-*` npm packages `0.1.0-rc.6`
-- Drive9 JavaScript SDK `0.1.4`
+- Drive9 JavaScript SDK `0.3.0`
 
 ## Product Boundary
 
-Drive9 supplies a persistent workspace and durable evidence. It does not supply a shell, process sandbox, language server, or compute runtime.
+Drive9 supplies a persistent workspace and durable evidence. The optional foreground Runtime shell extension is specified in [runtime-exec.md](runtime-exec.md). The original mount-based configuration remains the default; no language server, PTY or background process provider is added.
 
 DeepSeek Harness owns the agent loop and session history. Drive9 owns the persistent
 workspace and immutable evidence. The user's DSH deployment owns the runtime and
@@ -25,7 +25,7 @@ The workspace is mounted before DeepSeek Harness starts. V1 has two explicit con
 
 Real macOS WebDAVFS validation showed that the Drive9 bridge observed an SDK write immediately while the mounted `open`/`stat` view remained stale or blocked for more than 30 seconds. The package never silently downgrades `strong` into `eventual`; the relaxed profile must be selected in configuration and emits a runtime warning. Coding-agent local-overlay profiles remain unsupported because process paths may address different objects from SDK operations.
 
-Evidence uses a separate Drive9 credential and an unmounted root. Workspace tools, `processPath()`, `fileUrl()`, shell commands, and workspace deletion cannot address evidence objects.
+Evidence uses a separate Drive9 credential and an unmounted root. Optional Runtime exec additionally requires a distinct authenticated tenant, because an unmounted root on the same drive does not isolate it from remote commands. Workspace tools, `processPath()`, `fileUrl()`, shell commands, and workspace deletion cannot address evidence objects.
 
 V1 does not provide LayerFS checkpoints, workspace rollback, or exactly-once external tool side effects.
 
@@ -37,7 +37,8 @@ One npm package, `@drive9/drive9-dsh`, exposes independent Cordis components:
 - `@drive9/drive9-dsh/evidence` — `Drive9EvidenceStore`, registered as `ctx.spillStore`.
 - `@drive9/drive9-dsh/result-tools` — bounded `result_read` and `result_search` tools.
 - `@drive9/drive9-dsh/runtime-context` — model-visible eventual-consistency warning.
-- `@drive9/drive9-dsh` — a programmatic preset that installs all four components.
+- `@drive9/drive9-dsh/shell` — optional foreground Drive9 Runtime execution.
+- `@drive9/drive9-dsh` — a programmatic preset for storage plus optional Runtime.
 - `@drive9/drive9-dsh/cordis.patch.yml` — a DSH bundle patch for one-command installation.
 
 The single package keeps installation simple without merging unrelated responsibilities. Every component remains independently importable and testable.

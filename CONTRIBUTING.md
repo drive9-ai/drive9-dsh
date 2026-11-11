@@ -80,7 +80,7 @@ dsh web --dump-config
 - Preserve SDK revision CAS in both consistency profiles.
 - Do not expose evidence paths, namespace listing, or possession-only authorization.
 - Keep model-facing reads and searches bounded by package hard limits.
-- Do not broaden V1 into a shell, sandbox, or LayerFS implementation.
+- Keep the optional foreground Runtime shell within [its reviewed contract](docs/runtime-exec.md). Do not broaden it into a remote background-process, PTY, sandbox or LayerFS implementation.
 
 Changes to these contracts require updating [docs/design-lock.md](docs/design-lock.md)
 and obtaining a fresh design review before implementation.

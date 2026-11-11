@@ -7,6 +7,7 @@ import type { Drive9EvidenceConfig } from './evidence.js'
 import * as resultTools from './result-tools.js'
 import type { Drive9ResultToolsConfig } from './result-tools.js'
 import * as runtimeContext from './runtime-context.js'
+import Drive9Shell, { type Drive9ShellConfig } from './shell.js'
 
 export { Drive9FileSystem } from './filesystem.js'
 export type { Drive9FileSystemConfig, Drive9MountConsistency } from './filesystem.js'
@@ -28,18 +29,23 @@ export {
 } from './result-tools.js'
 export type { Drive9ResultToolsConfig } from './result-tools.js'
 
+export { Drive9Shell } from './shell.js'
+export type { Drive9ShellConfig } from './shell.js'
+
 export const name = 'drive9-dsh'
 
 export interface Drive9DshConfig {
   readonly filesystem: Drive9FileSystemConfig
   readonly evidence: Drive9EvidenceConfig
   readonly resultTools?: Drive9ResultToolsConfig
+  readonly runtime?: Drive9ShellConfig | undefined
 }
 
 export const Config: z<Drive9DshConfig> = z.object({
   filesystem: Drive9FileSystem.Config.required(),
   evidence: Drive9EvidenceStore.Config.required(),
   resultTools: resultTools.Config.default({}),
+  runtime: z.union([z.const(undefined), Drive9Shell.Config]),
 })
 
 export async function apply(ctx: Context, config: Drive9DshConfig): Promise<void> {
@@ -57,6 +63,7 @@ export async function apply(ctx: Context, config: Drive9DshConfig): Promise<void
     ...config.evidence,
     workspaceApiKey: config.filesystem.apiKey,
   })
+  if (config.runtime !== undefined) await ctx.plugin(Drive9Shell, config.runtime)
   await ctx.plugin(resultTools, config.resultTools ?? {})
   await ctx.plugin(runtimeContext, { mountConsistency: config.filesystem.mountConsistency ?? 'strong' })
 }

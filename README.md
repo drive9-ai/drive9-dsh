@@ -3,12 +3,13 @@
 Persistent agent workspaces and durable, bounded tool evidence for
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-`@drive9/drive9-dsh` is a standard DSH bundle with four independent Cordis components:
+`@drive9/drive9-dsh` is a standard DSH bundle with independent Cordis components:
 
 - a Drive9 revision-CAS filesystem for Harness `read`, `write`, and `edit` tools;
 - an isolated evidence backend for oversized tool results;
 - model-visible `result_search` and `result_read` tools with hard output limits;
-- a model-visible runtime-context warning for the opt-in eventual mount profile.
+- a model-visible runtime-context warning for the opt-in eventual mount profile;
+- an optional foreground Bash provider backed by Drive9 Runtime exec.
 
 The architecture keeps four lifecycles separate:
 
@@ -17,15 +18,17 @@ The architecture keeps four lifecycles separate:
 | Agent loop | DeepSeek Harness |
 | Session and conversation history | DeepSeek Harness |
 | Persistent workspace and immutable evidence | Drive9 |
-| Shell, sandbox, language servers, and compute runtime | the user's DSH deployment |
+| Shell | the user's DSH deployment by default; optional Drive9 Runtime exec |
+| Local sandbox, terminals and language servers | the user's DSH deployment |
 
 The Drive9 mount only exposes the persistent workspace inside an existing runtime.
 It does not create, own, or keep that runtime alive. Evidence remains readable after
 the runtime or workspace disappears because it is stored under a separate, unmounted
 Drive9 root.
 
-Drive9 does **not** provide a shell or sandbox. V1 exposes two explicit mount-consistency
-profiles:
+The default bundle retains DSH's local shell and sandbox. The optional
+[Runtime shell](#optional-drive9-runtime-shell) runs foreground Bash remotely.
+Storage exposes two explicit mount-consistency profiles:
 
 - `strong` (default and recommended) uses a Linux Drive9 FUSE mount in the same
   execution world as Harness process tools. Startup proves SDK-to-mount and
@@ -201,7 +204,7 @@ The package declares a DSH bundle, so the standard `dsh plugin` command installs
 and adds its `cordis.patch.yml` layer to the selected profile. The bundle disables the stock
 `fs-sandbox` and `spill-local` storage providers, then installs the Drive9 filesystem,
 evidence backend, and result tools. Harness's stock filesystem tools, subprocess
-runtime, sandbox policy, observation policy, and spill policy remain in place. The
+runtime (unless Runtime exec is explicitly enabled), sandbox policy, observation policy, and spill policy remain in place. The
 Drive9 filesystem implements the same per-call `read-only`, `workspace-write`, and
 `danger-full-access` mutation policy that the replaced filesystem provider enforced.
 
@@ -382,11 +385,77 @@ Errors never include credentials or authorization headers.
 
 See [SECURITY.md](SECURITY.md) and the complete [V1 design lock](docs/design-lock.md).
 
+## Optional Drive9 Runtime shell
+
+Set `DRIVE9_EXEC=true` to route the standard DSH `bash` tool through Drive9 exec.
+The bundle disables the local Bash provider and background calls in this mode.
+Unset the variable to keep the original local shell. Filesystem tools still use
+SDK revision CAS and require the Drive9 mount; this is not a mount-free profile.
+
+Runtime requires Linux, the `strong` mount profile, a server advertising streaming
+exec and confirmed cancellation, and **separate workspace and evidence drives**.
+At startup the integration checks their authenticated tenant identities. Two
+different API keys for the same drive are insufficient: Runtime's `workspace.root`
+sets its starting directory, not a fence against other directories on that drive.
+
+Mount the workspace at the same absolute path that commands see remotely. For a
+server advertising `/workspace` and a Drive9 subtree `/work`, configure:
+
+```bash
+export DRIVE9_EXEC=true
+export DRIVE9_MOUNT_ROOT=/workspace/work
+export DRIVE9_REMOTE_ROOT=/work
+export DRIVE9_MOUNT_CONSISTENCY=strong
+```
+
+Create the strong-profile mount there using the mounting instructions above, with
+the workspace credential. Keep `DRIVE9_WORKSPACE_API_KEY` and
+`DRIVE9_EVIDENCE_API_KEY` in the Harness environment, with the latter belonging to
+a separate drive. The provider uses the existing filesystem client for exec;
+there is no additional Runtime credential or server setting.
+
+**Permission must be explicit.** Runtime cannot enforce DSH's `read-only` or
+`workspace-write` file policy across the entire remote filesystem. This provider
+therefore rejects those modes. An operator choosing unrestricted remote execution
+can explicitly select DSH's `danger-full-access` policy (for example with
+`DSH_PERMISSION_MODE=danger-full-access` in the standard base profile). Enabling
+`DRIVE9_EXEC` alone never changes that policy. Keep the default local shell if you
+need DSH's confined modes. Remote commands do not receive the Harness host's
+ambient environment or evidence credential.
+
+Commands use `bash -c`, including Bash syntax such as arrays. Each call starts a
+fresh shell; use `workdir` instead of relying on a previous `cd`. stdin injection,
+background jobs and PTY are unsupported. Bash heredocs and pipes remain available.
+Only the Bash capability is replaced: other process-backed Harness tools, such as
+language servers and persistent terminals, continue to run in the Harness host.
+
+The default timeout is 60 seconds and captured output is a 64 KiB tail per stream.
+Timeouts and output budgets are capped by the server and package limits (15 minutes
+and 1 MiB respectively). Truncation is explicit; no full-output file is invented.
+A programmatic composition can load `@drive9/drive9-dsh/shell` with `timeoutMs` and
+`maxOutputBytes`, or set `runtime: { timeoutMs: 60000, maxOutputBytes: 65536 }` on
+the preset. It must remove the existing shell provider and configure the standard
+bash tool with `enableRunInBackground: false`.
+
+Ordinary command exit codes are preserved. Confirmed timeout and cancellation
+report 124 and 130. Awaiting cancellation confirmation can add up to 20 seconds
+after the command deadline. Executor failures remain errors, including `engine_error`,
+which is distinct from grep's normal no-match exit 1. An unknown outcome includes
+an execution ID when available and output tails. Inspect the result before
+retrying: a broken connection is not proof that the command stopped. There is no
+automatic local fallback or command retry.
+
+The [Runtime contract](docs/runtime-exec.md) describes capability validation,
+namespace checks and shutdown behavior. Automated tests cover the standard bash
+tool in a real Harness loop, using the published SDK, a local HTTP fixture and
+real Bash processes. They do **not** establish production Runtime/FUSE validation;
+run the deployment's own live smoke checks before relying on this optional mode.
+
 ## Limits
 
 V1 intentionally does not provide:
 
-- a shell, process sandbox, terminal, or language server;
+- a remote background shell, PTY, process sandbox provider, terminal, or language server;
 - automatic Drive9 mounting;
 - strong subprocess read-your-writes through WebDAV;
 - local-overlay support for either consistency profile;
@@ -430,7 +499,7 @@ the release checklist. The real test rejects non-Linux and non-FUSE mount roots.
 | --- | --- |
 | Node.js | 22.19 or newer |
 | DeepSeek Harness | `0.1.0-rc.6` |
-| Drive9 JavaScript SDK | `0.1.4` |
+| Drive9 JavaScript SDK | `0.3.0` |
 | `strong` | Linux Drive9 FUSE; writes wait for exact process-visible bytes. Current real-service validation observed SDK-to-mount convergence in 1.3–1.5 seconds and mount-close-to-new-SDK-revision convergence in 0.36–0.40 seconds. These observations are not an SLA. |
 | `eventual` | WebDAV; no subprocess read-your-writes guarantee, with observed staleness beyond 30 seconds. |
 

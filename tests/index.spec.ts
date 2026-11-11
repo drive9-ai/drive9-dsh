@@ -9,6 +9,14 @@ describe('Drive9 DSH preset', () => {
     expect('default' in await import('../src/result-tools.js')).toBe(false)
   })
 
+  it('keeps Runtime absent through actual schema parsing unless explicitly configured', () => {
+    const input = { filesystem: { apiKey: 'workspace-key' }, evidence: { apiKey: 'evidence-key' } }
+    expect(Drive9Dsh.Config(input).runtime).toBeUndefined()
+    expect(Drive9Dsh.Config({ ...input, runtime: {} }).runtime).toEqual({ timeoutMs: 60_000, maxOutputBytes: 65_536 })
+    // @ts-expect-error Exercise malformed external configuration.
+    expect(() => Drive9Dsh.Config({ ...input, runtime: true })).toThrow()
+  })
+
   it('requires separate explicit workspace and evidence credentials before mounting services', async () => {
     await expect(Drive9Dsh.apply(new Context(), {
       filesystem: { apiKey: '' },

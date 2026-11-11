@@ -1,0 +1,18 @@
+# Shell/storage rows from DeepSeek Harness dsh-base at
+# 47f943859bef60e4160492346772ded9b24f765a (MIT), matching npm 0.1.0-rc.6.
+# Only unrelated capabilities are omitted from this composition fixture.
+- id: fs-sandbox
+  name: '@deepseek-ai/dsh-fs-sandbox'
+- id: spill-local
+  name: '@deepseek-ai/dsh-spill-local'
+- id: bash-sandbox
+  name: '@deepseek-ai/dsh-bash-sandbox'
+  disabled: !!js process.platform === 'win32'
+  config:
+    timeoutMs: 60000
+- id: pwsh-sandbox
+  name: '@deepseek-ai/dsh-pwsh-sandbox'
+  disabled: !!js process.platform !== 'win32'
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'

@@ -12,7 +12,9 @@ mitigation. Rotate any credential that may have been exposed during testing.
 
 - Drive9 workspace and evidence credentials are distinct and path-scoped.
 - Evidence storage is not mounted into the agent execution world.
-- The Drive9 mount and Harness subprocess runtime share one host, container, or VM.
+- In the default profile, the Drive9 mount and Harness subprocess runtime share one host, container, or VM.
+- Optional Runtime exec requires a separate authenticated evidence tenant, not just a different token or unmounted directory. Runtime commands can address the whole workspace drive.
+- Runtime exec accepts only explicitly approved `danger-full-access`; it does not claim host-wide read-only or subtree confinement. The local and remote workspace paths must match.
 - TLS and Drive9 authentication terminate at a trusted endpoint.
 - Session seeding is trusted same-process Harness composition code.
 
